@@ -48,8 +48,6 @@ Trong đó phải có các thư mục/file con:
 - `ImageSets/Segmentation/train.txt`
 - `ImageSets/Segmentation/val.txt`
 
-Nếu thầy giữ nguyên bộ dữ liệu VOC như đã giải nén thì không cần chỉnh gì thêm.
-
 ### 4. Cài thư viện (Windows)
 
 ```bash
