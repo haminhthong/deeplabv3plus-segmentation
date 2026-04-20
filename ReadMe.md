@@ -1,11 +1,11 @@
 # Hướng dẫn chạy mô hình phân đoạn ảnh DeepLabV3+
 
-Dự án này huấn luyện mô hình `DeepLabV3+` (encoder `ResNet50`) trên bộ dữ liệu Pascal VOC 2012 chưa có sẵn trong thư mục `data/`. Thầy giải nén file data.zip và bỏ vào Soure để chạy ạ.
+Dự án này huấn luyện mô hình `DeepLabV3+` (encoder `ResNet50`) trên bộ dữ liệu Pascal VOC 2012 chưa có sẵn trong thư mục `data/`. Nguồn da ta : https://www.kaggle.com/datasets/gopalbhattrai/pascal-voc-2012-dataset
 
 ### 1. Cấu trúc lưu trữ trong project
 
 ```text
-Soure_Nhom02_PhanDoanAnh(DeepLab)/
+deeplabv3plus-segmentation/
 ├─ data/
 │  ├─ VOC2012_train_val/VOC2012_train_val/
 │  └─ VOC2012_test/VOC2012_test/
