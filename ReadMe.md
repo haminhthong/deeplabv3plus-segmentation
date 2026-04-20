@@ -55,7 +55,7 @@ pip install -r requirements.txt
 ```
 
 ### 5. Huấn luyện mô hình
-
+do điều kiện thiết bị nên có giới hạn 
 ```bash
 python train_deeplabv3plus.py --epochs 40 --batch-size 8 --image-size 320
 ```
