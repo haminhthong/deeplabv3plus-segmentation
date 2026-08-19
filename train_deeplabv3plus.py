@@ -1,6 +1,8 @@
 import argparse
+import json
 import os
 import random
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,7 @@ from config import IGNORE_INDEX as VOC_IGNORE_INDEX
 from config import NUM_CLASSES as VOC_NUM_CLASSES
 from config import VOC_ROOT
 from dataset_voc import VOCSegmentationDataset, get_train_transforms, get_val_transforms
+from metrics import SegmentationMetrics
 
 
 def set_seed(seed: int) -> None:
@@ -22,61 +25,39 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-class ConfusionMatrix:
-    def __init__(self, num_classes: int):
-        self.num_classes = num_classes
-        self.mat = np.zeros((num_classes, num_classes), dtype=np.int64)
-
-    def update(self, preds: torch.Tensor, targets: torch.Tensor, ignore_index: int):
-        valid = targets != ignore_index
-        a = targets[valid].cpu().numpy()
-        b = preds[valid].cpu().numpy()
-        n = self.num_classes
-        k = (a >= 0) & (a < n)
-        inds = n * a[k] + b[k]
-        self.mat += np.bincount(inds, minlength=n**2).reshape(n, n)
-
-    def compute(self) -> float:
-        h = self.mat.sum(1)
-        w = self.mat.sum(0)
-        diag = np.diag(self.mat)
-        union = h + w - diag
-        valid_classes = union > 0
-        if not np.any(valid_classes):
-            return 0.0
-        ious = diag[valid_classes] / union[valid_classes]
-        return float(np.mean(ious))
-
-
-def run_epoch(model, loader, criterion, optimizer, device, num_classes, ignore_index, train_mode=True):
+def run_epoch(model, loader, criterion, optimizer, device, num_classes, ignore_index, train_mode=True, scaler=None):
     if train_mode:
         model.train()
     else:
         model.eval()
 
     epoch_loss = 0.0
-    conf_mat = ConfusionMatrix(num_classes)
+    metrics = SegmentationMetrics(num_classes)
 
     for images, masks in loader:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
 
-        with torch.set_grad_enabled(train_mode):
+        with torch.set_grad_enabled(train_mode), torch.autocast(device_type=device.type, enabled=scaler is not None):
             logits = model(images)
             loss = criterion(logits, masks)
 
             if train_mode:
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                if scaler is None:
+                    loss.backward()
+                    optimizer.step()
+                else:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
 
         preds = torch.argmax(logits, dim=1)
-        conf_mat.update(preds, masks, ignore_index)
+        metrics.update(preds, masks, ignore_index)
         epoch_loss += loss.item()
 
     avg_loss = epoch_loss / max(len(loader), 1)
-    avg_miou = conf_mat.compute()
-    return avg_loss, avg_miou
+    return avg_loss, metrics.compute()
 
 
 def build_model(num_classes: int, encoder: str, encoder_weights: str):
@@ -92,7 +73,7 @@ class CombinedLoss(nn.Module):
     def __init__(self, ignore_index):
         super().__init__()
         self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
-        # smp.losses.DiceLoss hỗ trợ ignore_index để tránh tính loss trên vùng nhãn nền (255)
+        # DiceLoss bỏ qua vùng void 255; background của Pascal VOC là class 0.
         self.dice = smp.losses.DiceLoss(mode="multiclass", ignore_index=ignore_index)
 
     def forward(self, logits, masks):
@@ -111,6 +92,9 @@ def main():
     parser.add_argument("--encoder-weights", type=str, default="imagenet")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="outputs")
+    parser.add_argument("--resume", type=Path, default=None, help="Tiếp tục từ checkpoint")
+    parser.add_argument("--patience", type=int, default=0, help="Early stopping; 0 là tắt")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -156,17 +140,34 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     # Trình tự động giảm Learning Rate theo hình Cosine (Cosine Annealing)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    active_scaler = scaler if scaler.is_enabled() else None
 
     best_miou = -1.0
+    start_epoch = 1
+    stale_epochs = 0
     history_lines = ["epoch,train_loss,train_miou,val_loss,val_miou"]
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if active_scaler is not None and checkpoint.get("scaler_state_dict"):
+            active_scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_miou = float(checkpoint.get("best_val_miou", -1.0))
+        log_path = output_dir / "train_log.csv"
+        if log_path.exists():
+            history_lines = log_path.read_text(encoding="utf-8").splitlines()
 
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_miou = run_epoch(
-            model, train_loader, criterion, optimizer, device, VOC_NUM_CLASSES, VOC_IGNORE_INDEX, train_mode=True
+    for epoch in range(start_epoch, args.epochs + 1):
+        train_loss, train_metrics = run_epoch(
+            model, train_loader, criterion, optimizer, device, VOC_NUM_CLASSES, VOC_IGNORE_INDEX, True, active_scaler
         )
-        val_loss, val_miou = run_epoch(
+        val_loss, val_metrics = run_epoch(
             model, val_loader, criterion, optimizer, device, VOC_NUM_CLASSES, VOC_IGNORE_INDEX, train_mode=False
         )
+        train_miou, val_miou = train_metrics["mean_iou"], val_metrics["mean_iou"]
 
         print(
             f"Epoch {epoch:02d}/{args.epochs} | LR={scheduler.get_last_lr()[0]:.2e} | "
@@ -180,19 +181,45 @@ def main():
 
         if val_miou > best_miou:
             best_miou = val_miou
+            stale_epochs = 0
+            try:
+                git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+            except (OSError, subprocess.SubprocessError):
+                git_sha = None
             torch.save(
                 {
+                    "epoch": epoch,
                     "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": active_scaler.state_dict() if active_scaler else None,
                     "encoder": args.encoder,
                     "encoder_weights": args.encoder_weights,
                     "image_size": args.image_size,
                     "best_val_miou": best_miou,
+                    "loss": "cross_entropy + 0.5 * dice",
+                    "num_classes": VOC_NUM_CLASSES,
+                    "ignore_index": VOC_IGNORE_INDEX,
+                    "class_mapping": "Pascal VOC 2012",
+                    "train_args": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
+                    "git_commit": git_sha,
                 },
                 ckpt_path,
             )
             print(f"Saved best checkpoint -> {ckpt_path}")
+            serializable = {k: v for k, v in val_metrics.items() if k != "confusion_matrix"}
+            for key in ("per_class_iou", "per_class_dice"):
+                serializable[key] = [None if np.isnan(value) else float(value) for value in serializable[key]]
+            (output_dir / "best_metrics.json").write_text(
+                json.dumps(serializable, indent=2, allow_nan=False), encoding="utf-8"
+            )
+        else:
+            stale_epochs += 1
 
         (output_dir / "train_log.csv").write_text("\n".join(history_lines))
+        if args.patience > 0 and stale_epochs >= args.patience:
+            print(f"Early stopping after {stale_epochs} epochs without improvement.")
+            break
 
     print(f"Training finished. Best val mIoU={best_miou:.4f}")
 

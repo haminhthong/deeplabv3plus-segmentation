@@ -1,130 +1,137 @@
-# Hướng dẫn chạy mô hình phân đoạn ảnh DeepLabV3+
+# DeepLabV3+ Semantic Segmentation
 
-Dự án này huấn luyện mô hình `DeepLabV3+` (encoder `ResNet50`) trên bộ dữ liệu Pascal VOC 2012 chưa có sẵn trong thư mục `data/`. Thầy giải nén file data.zip và bỏ vào Soure để chạy ạ.
+[![CI](https://github.com/OWNER/REPOSITORY/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPOSITORY/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-### 1. Cấu trúc lưu trữ trong project
+Pipeline phân đoạn ngữ nghĩa Pascal VOC 2012 dùng DeepLabV3+ và PyTorch. Repository gồm huấn luyện, metric, resume checkpoint, trực quan hóa dự đoán và demo Streamlit cho ảnh tải lên.
 
-```text
-Soure_Nhom02_PhanDoanAnh(DeepLab)/
-├─ data/
-│  ├─ VOC2012_train_val/VOC2012_train_val/
-│  └─ VOC2012_test/VOC2012_test/
-├─ outputs/                      # sinh ra sau khi train/visualize
-│  ├─ deeplabv3plus_voc_best.pth
-│  ├─ train_log.csv
-│  ├─ training_curves.png
-│  └─ viz/
-├─ config.py                     # hằng số chung: NUM_CLASSES, IGNORE_INDEX, VOC_ROOT
-├─ voc_meta.py                   # tên lớp VOC + colormap VOC
-├─ dataset_voc.py                # Dataset Pascal VOC và transform
-├─ train_deeplabv3plus.py        # train DeepLabV3+
-├─ visualize_predictions.py      # vẽ Image/GT/Prediction/Overlay
-├─ plot_training_curves.py       # vẽ đồ thị loss và mIoU
-├─ streamlit_segmentation_ui.py  # giao diện người dùng Streamlit
-├─ requirements.txt
-└─ Hướng dẫn chạy.md
-```
+> Thay `OWNER/REPOSITORY` trong badge CI sau khi đưa repository lên GitHub.
 
-### 2. Vai trò từng file `.py`
+## Kết quả
 
-- `config.py`: cấu hình lõi dùng lại cho toàn bộ pipeline.
-- `voc_meta.py`: định nghĩa 21 lớp Pascal VOC và bảng màu hiển thị.
-- `dataset_voc.py`: đọc ảnh/mask VOC (`JPEGImages`, `SegmentationClass`) + transform train/val.
-- `train_deeplabv3plus.py`: huấn luyện mô hình `segmentation_models_pytorch.DeepLabV3Plus`, lưu checkpoint tốt nhất.
-- `visualize_predictions.py`: nạp checkpoint và xuất ảnh trực quan 4 cột.
-- `plot_training_curves.py`: đọc `outputs/train_log.csv` và vẽ đồ thị huấn luyện.
-- `streamlit_segmentation_ui.py`: UI để upload ảnh thật, dự đoán phân đoạn, liệt kê lớp đối tượng, xem đồ thị.
+Không công bố số liệu chưa được kiểm chứng. Sau khi huấn luyện, metric tốt nhất được ghi vào `outputs/best_metrics.json` và lịch sử từng epoch vào `outputs/train_log.csv`.
 
-### 3. Cấu trúc dữ liệu VOC đang dùng
+| Model | Backbone | Input | Loss | Val mIoU | Mean Dice | Pixel Accuracy |
+|---|---|---:|---|---:|---:|---:|
+| DeepLabV3+ | ResNet50 | 320 | CE + 0.5 Dice | Chưa đo | Chưa đo | Chưa đo |
 
-Mặc định script sử dụng thư mục:
+Khi có kết quả đã xác nhận, cập nhật bảng cùng cấu hình GPU, thời gian huấn luyện, ảnh dự đoán tốt và failure cases. Checkpoint lớn nên được phát hành qua GitHub Release hoặc Hugging Face; repository hiện không tự nhận là có checkpoint công khai.
 
-`data/VOC2012_train_val/VOC2012_train_val`
+## Điểm chính
 
-Trong đó phải có các thư mục/file con:
+- Nhãn VOC: `0` là background, `1–20` là đối tượng, `255` là vùng void bị bỏ qua.
+- Train bằng random scale, crop/pad, horizontal flip, affine nhẹ và color jitter.
+- Validation/inference giữ tỷ lệ ảnh và pad thay vì kéo ảnh thành hình vuông.
+- Metric gồm mIoU, mIoU không background, per-class IoU, mean Dice, pixel accuracy và mean class accuracy.
+- Checkpoint chứa model, optimizer, scheduler, AMP scaler, epoch, tham số train và Git commit.
+- Demo upload chỉ cần checkpoint; dataset chỉ cần cho tab đánh giá VOC.
+- Mask dự đoán được đưa về đúng kích thước ảnh gốc trước khi overlay.
 
-- `JPEGImages/`
-- `SegmentationClass/`
-- `ImageSets/Segmentation/train.txt`
-- `ImageSets/Segmentation/val.txt`
+## Cài đặt
 
-Nếu thầy giữ nguyên bộ dữ liệu VOC như đã giải nén thì không cần chỉnh gì thêm.
-
-### 4. Cài thư viện (Windows)
+Yêu cầu Python 3.11. Với CUDA, nên cài bản PyTorch phù hợp trước, rồi cài dependency còn lại.
 
 ```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 5. Huấn luyện mô hình
+Dataset mặc định:
 
-```bash
-python train_deeplabv3plus.py --epochs 40 --batch-size 8 --image-size 320
+```text
+data/VOC2012_train_val/VOC2012_train_val/
+├── JPEGImages/
+├── SegmentationClass/
+└── ImageSets/Segmentation/
+    ├── train.txt
+    └── val.txt
 ```
 
-Kết quả được lưu trong thư mục `outputs/`:
+Có thể chỉ định vị trí khác bằng `--data-root`.
 
-- `deeplabv3plus_voc_best.pth`: checkpoint tốt nhất theo mIoU trên tập `val`
-- `train_log.csv`: log loss và mIoU theo từng epoch
-
-Có thể thay đổi số epoch hoặc batch size nếu muốn:
+## Huấn luyện
 
 ```bash
-python train_deeplabv3plus.py --epochs 30 --batch-size 4
+python train_deeplabv3plus.py --epochs 50 --batch-size 8 \
+  --image-size 320 --amp --patience 8
 ```
 
-### 6. Trực quan hóa kết quả phân đoạn
-
-Sau khi đã có checkpoint (đã train xong), chạy:
+Tiếp tục một lần chạy:
 
 ```bash
-python visualize_predictions.py --indices 0 1 2 3 4 --checkpoint outputs/deeplabv3plus_voc_best.pth
+python train_deeplabv3plus.py --epochs 80 \
+  --resume outputs/deeplabv3plus_voc_best.pth
 ```
 
-Script sẽ:
+Artifact trong `outputs/`:
 
-- Đọc checkpoint trong `outputs/deeplabv3plus_voc_best.pth`
-- Dự đoán trên các chỉ số mẫu của tập `val`
-- Vẽ 4 cột: `Image` / `Ground truth` / `Prediction` / `Overlay`
-- Lưu từng ảnh trực quan vào `outputs/viz/`
+- `deeplabv3plus_voc_best.pth`: checkpoint có validation mIoU tốt nhất.
+- `best_metrics.json`: metric chi tiết của checkpoint tốt nhất.
+- `train_log.csv`: loss và mIoU theo epoch.
 
-### 7. Trực quan hóa đồ thị quá trình huấn luyện
+## Dự đoán và trực quan hóa
 
-Sau khi train xong, file log nằm trong `outputs/train_log.csv`. Thầy có thể vẽ đồ thị:
+Checkpoint đã huấn luyện là bắt buộc vì decoder segmentation không có ý nghĩa nếu chỉ dùng encoder ImageNet.
 
 ```bash
-python plot_training_curves.py --log-path outputs/train_log.csv --output-path outputs/training_curves.png
+python visualize_predictions.py \
+  --checkpoint outputs/deeplabv3plus_voc_best.pth --indices 0 1 2 3 4
 ```
 
-Script sẽ tạo ảnh `outputs/training_curves.png` gồm 2 biểu đồ:
+Ảnh Image / Ground truth / Prediction / Overlay được lưu vào `outputs/viz/`. Vẽ learning curves bằng `python plot_training_curves.py`.
 
-- Loss theo epoch (Train/Val)
-- mIoU theo epoch (Train/Val)
-
-### 8. Giao diện người dùng (Streamlit)
-
-Nếu thầy muốn xem dự đoán và đồ thị ngay trong một giao diện web:
+## Demo Streamlit
 
 ```bash
 python -m streamlit run streamlit_segmentation_ui.py
 ```
 
-Sau đó mở đường link mà Streamlit in ra (thường là `http://localhost:8501`).
+Tab **Tải ảnh thực tế** hoạt động khi có checkpoint, không yêu cầu Pascal VOC. Tab đánh giá VOC kiểm tra dataset riêng khi bấm chạy. Thanh bên có ngưỡng diện tích tối thiểu để lọc lớp xuất hiện do vài pixel nhiễu.
 
-Các chức năng chính trong UI:
+## Kiểm thử
 
-- Upload ảnh thực tế (`jpg/png`) để phân đoạn.
-- Hiển thị `Input` / `Prediction (Mask)` / `Overlay`.
-- Tự liệt kê các lớp đối tượng xuất hiện (20 lớp đối tượng VOC, không tính background).
-- Tab xem đồ thị loss và mIoU theo epoch.
+```bash
+python -m compileall -q .
+pytest -q
+```
 
-### 9. Tùy chỉnh nhanh
+GitHub Actions chạy hai lệnh cho mỗi push và pull request.
 
-- **Đổi backbone**: thêm tham số, ví dụ `--encoder resnet101`
-- **Đổi kích thước ảnh**: `--image-size 512`
-- **Đổi đường dẫn data** (nếu không để đúng như mặc định): `--data-root <duong_dan_toi_VOC>`
+## Cấu trúc
 
-### 10. Ghi chú
+```text
+├── config.py
+├── dataset_voc.py
+├── inference.py
+├── metrics.py
+├── train_deeplabv3plus.py
+├── visualize_predictions.py
+├── streamlit_segmentation_ui.py
+├── plot_training_curves.py
+├── voc_meta.py
+├── tests/
+├── .github/workflows/ci.yml
+└── requirements.txt
+```
 
-- Dataset VOC dùng nhãn `255` làm ignore index, script đã xử lý sẵn.
-- Nếu máy có GPU CUDA, PyTorch sẽ tự động dùng GPU, nếu không sẽ chạy trên CPU (sẽ chậm hơn).
+## Hạn chế và roadmap
+
+- Chưa có checkpoint công khai hoặc demo online.
+- Chưa có ablation xác nhận cho loss, backbone và image size.
+- Chưa benchmark latency/FPS, peak VRAM hoặc xuất ONNX.
+- Pipeline hiện tối ưu cho Pascal VOC 2012 và 21 lớp cố định.
+
+Thí nghiệm tiếp theo nên so sánh CE với CE + Dice, backbone nặng/nhẹ, input 320/512 và DeepLabV3+ với U-Net/FCN baseline.
+
+## Tài liệu tham khảo
+
+- Chen et al., *Encoder-Decoder with Atrous Separable Convolution for Semantic Image Segmentation*.
+- Everingham et al., *The Pascal Visual Object Classes Challenge*.
+- `segmentation-models-pytorch`.
+
+## License
+
+MIT — xem [LICENSE](LICENSE).

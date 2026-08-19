@@ -4,13 +4,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import segmentation_models_pytorch as smp
 import streamlit as st
 import torch
 from PIL import Image
-from torchvision import transforms
 
 from config import IGNORE_INDEX, NUM_CLASSES, VOC_ROOT
+from inference import load_checkpoint_model, predict_original_size
 from plot_training_curves import read_training_log
 from voc_meta import VOC_CLASS_NAMES, mask_to_color_rgb
 
@@ -23,7 +22,7 @@ def overlay_mask(image_rgb: np.ndarray, mask_rgb: np.ndarray, alpha: float = 0.5
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def summarize_present_classes(mask: np.ndarray):
+def summarize_present_classes(mask: np.ndarray, min_area_percent: float = 0.1):
     """
     mask: (H, W) int, values 0..20
     trả về danh sách các từ điển: class_id, class_name, pixels, percent
@@ -35,14 +34,15 @@ def summarize_present_classes(mask: np.ndarray):
     rows = []
     for class_id in range(1, NUM_CLASSES):  # bỏ qua nhãn nền (background)
         pixels = int(counts[class_id])
-        if pixels <= 0:
+        percent = (pixels / total) * 100.0
+        if percent < min_area_percent:
             continue
         rows.append(
             {
                 "class_id": class_id,
                 "class_name": VOC_CLASS_NAMES.get(class_id, str(class_id)),
                 "pixels": pixels,
-                "percent": (pixels / total) * 100.0,
+                "percent": percent,
             }
         )
     rows.sort(key=lambda r: r["pixels"], reverse=True)
@@ -58,34 +58,10 @@ def _get_ids(data_root: Path, split: str):
 @st.cache_resource(show_spinner=False)
 def load_model(checkpoint_path_str: str, device_str: str):
     device = torch.device(device_str)
-    ckpt_path = Path(checkpoint_path_str)
-    ckpt = torch.load(ckpt_path, map_location=device)
+    model, ckpt = load_checkpoint_model(checkpoint_path_str, device)
     encoder = ckpt.get("encoder", "resnet50")
-
-    model = smp.DeepLabV3Plus(
-        encoder_name=encoder,
-        encoder_weights=None,
-        classes=NUM_CLASSES,
-        activation=None,
-    )
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.to(device)
-    model.eval()
     image_size = int(ckpt.get("image_size", 320))
     return model, encoder, image_size
-
-
-@st.cache_resource(show_spinner=False)
-def build_transforms(image_size: int):
-    image_transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        ]
-    )
-    mask_resize = transforms.Resize((image_size, image_size), interpolation=Image.NEAREST)
-    return image_transform, mask_resize
 
 
 def main():
@@ -104,6 +80,7 @@ def main():
         image_size_ui = st.number_input("Image size", min_value=128, max_value=1024, value=320, step=32)
         num_samples = st.slider("Số ảnh hiển thị", min_value=1, max_value=12, value=6, step=1)
         random_seed = st.number_input("Seed chọn ảnh", min_value=0, max_value=10_000, value=42, step=1)
+        min_area = st.number_input("Diện tích lớp tối thiểu (%)", min_value=0.0, max_value=10.0, value=0.1, step=0.1)
 
         device_str = "cuda" if torch.cuda.is_available() else "cpu"
         st.caption(f"Thiết bị: {device_str}")
@@ -112,13 +89,6 @@ def main():
 
     data_root = Path(data_root_str)
     ckpt_path = Path(ckpt_path_str)
-
-    if not data_root.exists():
-        st.error(f"Không tìm thấy `data_root`: {data_root}")
-        return
-    if not ckpt_path.exists():
-        st.error(f"Không tìm thấy `checkpoint`: {ckpt_path}")
-        return
 
     with tabs[0]:
         st.subheader("Tải ảnh thực tế lên và liệt kê 20 đối tượng (VOC)")
@@ -130,17 +100,13 @@ def main():
         if uploaded is None:
             st.info("Hãy tải 1 ảnh lên để bắt đầu.")
         elif run_btn:
+            if not ckpt_path.is_file():
+                st.error(f"Không tìm thấy checkpoint: {ckpt_path}")
+                st.stop()
             model, encoder, ckpt_image_size = load_model(str(ckpt_path), device_str)
-            image_transform, _ = build_transforms(int(image_size_ui))
-
             image = Image.open(uploaded).convert("RGB")
-            input_tensor = image_transform(image).unsqueeze(0).to(next(model.parameters()).device)
-
-            with torch.no_grad():
-                pred_logits = model(input_tensor)
-                pred_mask = torch.argmax(pred_logits, dim=1).squeeze(0).cpu().numpy().astype(np.int64)
-
-            image_resized = np.array(image.resize((int(image_size_ui), int(image_size_ui))))
+            pred_mask = predict_original_size(model, image, int(image_size_ui), torch.device(device_str))
+            image_resized = np.array(image)
             pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
             pred_overlay = overlay_mask(image_resized, pred_vis, alpha=alpha)
 
@@ -150,7 +116,7 @@ def main():
             c3.image(pred_overlay, caption="Overlay", use_container_width=True)
 
             st.markdown("### Kết quả liệt kê đối tượng (20 lớp VOC)")
-            rows = summarize_present_classes(pred_mask)
+            rows = summarize_present_classes(pred_mask, float(min_area))
             if not rows:
                 st.warning("Không phát hiện lớp đối tượng nào (ngoài background).")
             else:
@@ -181,11 +147,14 @@ def main():
         load_btn = st.button("Chạy dự đoán", type="primary")
 
         if load_btn:
+            if not ckpt_path.is_file():
+                st.error(f"Không tìm thấy checkpoint: {ckpt_path}")
+                st.stop()
+            split_file = data_root / "ImageSets" / "Segmentation" / f"{split}.txt"
+            if not split_file.is_file():
+                st.error(f"Không tìm thấy Pascal VOC split: {split_file}")
+                st.stop()
             model, encoder, ckpt_image_size = load_model(str(ckpt_path), device_str)
-
-            # Nếu image_size user khác image_size trong checkpoint thì ta vẫn resize theo image_size UI.
-            # DeepLabV3+ dự đoán fully-conv nên thường chạy được linh hoạt.
-            image_transform, mask_resize = build_transforms(int(image_size_ui))
 
             ids = _get_ids(data_root, split)
             random.seed(int(random_seed))
@@ -199,19 +168,13 @@ def main():
                 image = Image.open(img_path).convert("RGB")
                 gt_mask_img = Image.open(mask_path)
 
-                # Ground truth resize (nearest) và convert numpy int64
-                gt_mask = np.array(mask_resize(gt_mask_img), dtype=np.int64)
+                gt_mask = np.array(gt_mask_img, dtype=np.int64)
                 gt_vis = mask_to_color_rgb(gt_mask, ignore_index=IGNORE_INDEX)
 
-                input_tensor = image_transform(image).unsqueeze(0)
-                input_tensor = input_tensor.to(next(model.parameters()).device)
-
-                with torch.no_grad():
-                    pred_logits = model(input_tensor)
-                    pred_mask = torch.argmax(pred_logits, dim=1).squeeze(0).cpu().numpy().astype(np.int64)
+                pred_mask = predict_original_size(model, image, int(image_size_ui), torch.device(device_str))
 
                 pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
-                image_resized = np.array(image.resize((int(image_size_ui), int(image_size_ui))))
+                image_resized = np.array(image)
 
                 c1, c2, c3 = st.columns(3)
                 c1.image(image_resized, caption=f"Input ({image_id})", use_container_width=True)
