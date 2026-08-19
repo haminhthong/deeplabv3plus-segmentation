@@ -23,16 +23,13 @@ def overlay_mask(image_rgb: np.ndarray, mask_rgb: np.ndarray, alpha: float = 0.5
 
 
 def summarize_present_classes(mask: np.ndarray, min_area_percent: float = 0.1):
-    """
-    mask: (H, W) int, values 0..20
-    trả về danh sách các từ điển: class_id, class_name, pixels, percent
-    """
+    """Thống kê các lớp đối tượng có diện tích đạt ngưỡng yêu cầu."""
     flat = mask.reshape(-1)
     total = int(flat.size)
     counts = np.bincount(flat, minlength=NUM_CLASSES).astype(np.int64)
 
     rows = []
-    for class_id in range(1, NUM_CLASSES):  # bỏ qua nhãn nền (background)
+    for class_id in range(1, NUM_CLASSES):
         pixels = int(counts[class_id])
         percent = (pixels / total) * 100.0
         if percent < min_area_percent:
@@ -139,7 +136,6 @@ def main():
                 )
 
             with st.expander("Danh sách 20 lớp (VOC)"):
-                # chỉ hiển thị các lớp đối tượng từ 1 đến 20
                 st.write({k: VOC_CLASS_NAMES[k] for k in range(1, NUM_CLASSES)})
 
     with tabs[1]:
@@ -157,6 +153,9 @@ def main():
             model, encoder, ckpt_image_size = load_model(str(ckpt_path), device_str)
 
             ids = _get_ids(data_root, split)
+            if not ids:
+                st.error(f"Tệp chia dữ liệu không chứa mã ảnh: {split_file}")
+                st.stop()
             random.seed(int(random_seed))
             chosen = random.sample(ids, k=min(int(num_samples), len(ids)))
 
@@ -190,9 +189,7 @@ def main():
         st.subheader("Đồ thị Loss & mIoU theo epoch")
         log_path = data_root.parent / "outputs" / "train_log.csv"
 
-        # Cho phép cả trường hợp bạn đặt checkpoint trong outputs/... nhưng vẫn dùng data_root đúng.
         if not log_path.exists():
-            # fallback theo đúng cấu trúc hiện tại
             log_path = Path("outputs") / "train_log.csv"
 
         if not log_path.exists():
@@ -218,6 +215,7 @@ def main():
             axes[1].legend()
 
             st.pyplot(fig)
+            plt.close(fig)
             st.caption(f"Nguồn: {log_path}")
 
 

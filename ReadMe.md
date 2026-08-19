@@ -1,6 +1,5 @@
 # DeepLabV3+ Semantic Segmentation trên Pascal VOC 2012
 
-[![CI](https://github.com/OWNER/REPOSITORY/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPOSITORY/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.7.1-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -8,8 +7,6 @@
 Dự án xây dựng pipeline phân đoạn ngữ nghĩa hoàn chỉnh bằng **DeepLabV3+**, **PyTorch** và **Pascal VOC 2012**. Mỗi pixel trong ảnh được gán vào background hoặc một trong 20 lớp đối tượng như người, ô tô, xe đạp, chó và mèo.
 
 Repository hỗ trợ toàn bộ vòng đời thí nghiệm: đọc dữ liệu, augmentation đồng bộ ảnh–mask, huấn luyện, validation, lưu/resume checkpoint, đánh giá nhiều metric, trực quan hóa và demo Streamlit cho ảnh người dùng tải lên.
-
-> Trước khi public repository, thay `OWNER/REPOSITORY` trong badge CI bằng tên GitHub repository thực tế.
 
 ## Mục lục
 
@@ -22,7 +19,6 @@ Repository hỗ trợ toàn bộ vòng đời thí nghiệm: đọc dữ liệu,
 - [Metric đánh giá](#metric-đánh-giá)
 - [Trực quan hóa](#trực-quan-hóa)
 - [Demo Streamlit](#demo-streamlit)
-- [Kiểm thử và CI](#kiểm-thử-và-ci)
 - [Cấu trúc repository](#cấu-trúc-repository)
 - [Xử lý lỗi thường gặp](#xử-lý-lỗi-thường-gặp)
 - [Hạn chế và roadmap](#hạn-chế-và-roadmap)
@@ -298,33 +294,10 @@ Tab này cần cả checkpoint và dataset. Dataset chỉ được kiểm tra kh
 
 Đọc `outputs/train_log.csv` và hiển thị loss/mIoU của train và validation.
 
-## Kiểm thử và CI
-
-Chạy kiểm tra local:
-
-```bash
-python -m compileall -q .
-pytest -q
-```
-
-Các unit test hiện kiểm tra:
-
-- Metric với dự đoán hoàn hảo và void pixel.
-- Confusion matrix với ví dụ có kết quả biết trước.
-- Resize/pad giữ tỷ lệ và dùng `255` cho vùng padding mask.
-
-Workflow `.github/workflows/ci.yml` chạy syntax check và pytest cho mỗi push/pull request trên Python 3.11.
-
 ## Cấu trúc repository
 
 ```text
 .
-├── .github/
-│   └── workflows/
-│       └── ci.yml
-├── tests/
-│   ├── test_dataset.py
-│   └── test_metrics.py
 ├── config.py
 ├── dataset_voc.py
 ├── inference.py
@@ -399,7 +372,6 @@ Trước khi đưa dự án vào CV hoặc public GitHub, nên hoàn thành chec
 - [ ] Thêm 5–10 qualitative predictions.
 - [ ] Thêm ít nhất 2 failure cases và phân tích.
 - [ ] Tạo GitHub Release chứa checkpoint hoặc link Hugging Face.
-- [ ] Thay badge `OWNER/REPOSITORY`.
 - [ ] Thêm repository topics và homepage demo.
 - [ ] Ghi phần cứng và thời gian huấn luyện.
 

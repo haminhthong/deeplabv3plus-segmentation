@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
-import random
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -33,7 +33,7 @@ class TrainJointTransform:
         self.normalize = transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
     def __call__(self, image: Image.Image, mask: Image.Image):
-        # Random scale, sau đó crop/pad để không làm méo tỷ lệ đối tượng.
+        # Thay đổi tỷ lệ ngẫu nhiên rồi cắt hoặc đệm để không làm méo đối tượng.
         scale = random.uniform(0.75, 1.5)
         scaled_h = max(1, round(image.height * scale))
         scaled_w = max(1, round(image.width * scale))
@@ -48,26 +48,41 @@ class TrainJointTransform:
         image = TF.crop(image, top, left, self.h, self.w)
         mask = TF.crop(mask, top, left, self.h, self.w)
 
-        # Lật ngang ngẫu nhiên
+        # Lật ngang ảnh và mặt nạ cùng lúc.
         if random.random() > 0.5:
             image = TF.hflip(image)
             mask = TF.hflip(mask)
 
-        # Biến đổi Affine ngẫu nhiên (Xoay, Tịnh tiến, Thu phóng)
+        # Xoay, tịnh tiến và thu phóng nhẹ để tăng độ đa dạng của dữ liệu.
         if random.random() > 0.5:
-            # Thu hẹp độ nhiễu để tránh làm mờ hình / mất cấu trúc (Scale 0.9-1.1, góc nhỏ)
             angle = random.uniform(-10.0, 10.0)
-            translate = [int(random.uniform(-0.05, 0.05) * self.w), int(random.uniform(-0.05, 0.05) * self.h)]
+            translate = [
+                int(random.uniform(-0.05, 0.05) * self.w),
+                int(random.uniform(-0.05, 0.05) * self.h),
+            ]
             scale = random.uniform(0.9, 1.1)
-            # 255 là vùng void/không dùng khi tính loss và metric; background là 0.
-            image = TF.affine(image, angle=angle, translate=translate, scale=scale, shear=0, interpolation=transforms.InterpolationMode.BILINEAR)
-            mask = TF.affine(mask, angle=angle, translate=translate, scale=scale, shear=0, interpolation=transforms.InterpolationMode.NEAREST, fill=255)
+            image = TF.affine(
+                image,
+                angle=angle,
+                translate=translate,
+                scale=scale,
+                shear=0,
+                interpolation=transforms.InterpolationMode.BILINEAR,
+            )
+            # Nhãn 255 là vùng không được tính vào hàm mất mát và chỉ số đánh giá.
+            mask = TF.affine(
+                mask,
+                angle=angle,
+                translate=translate,
+                scale=scale,
+                shear=0,
+                interpolation=transforms.InterpolationMode.NEAREST,
+                fill=255,
+            )
 
-        # Thay đổi màu sắc ngẫu nhiên (chỉ áp dụng cho ảnh)
+        # Chỉ thay đổi màu ảnh vì mặt nạ chứa mã lớp.
         if random.random() > 0.5:
             image = self.color_jitter(image)
-        
-        # Chuyển thành Tensor
         image_t = self.normalize(TF.to_tensor(image))
         mask_t = torch.from_numpy(np.array(mask, dtype=np.int64))
         return image_t, mask_t
@@ -82,7 +97,11 @@ def get_train_transforms(h: int, w: int):
 
 
 def resize_and_pad(image: Image.Image, mask: Image.Image, h: int, w: int):
-    """Resize giữ nguyên tỷ lệ rồi pad tới (h, w)."""
+    """Đổi kích thước theo đúng tỷ lệ rồi đệm tới kích thước yêu cầu."""
+    if h <= 0 or w <= 0:
+        raise ValueError("Chiều cao và chiều rộng phải lớn hơn 0")
+    if image.size != mask.size:
+        raise ValueError(f"Ảnh và mặt nạ phải cùng kích thước: {image.size} != {mask.size}")
     scale = min(w / image.width, h / image.height)
     new_w = max(1, round(image.width * scale))
     new_h = max(1, round(image.height * scale))
@@ -103,7 +122,11 @@ class VOCSegmentationDataset(Dataset):
         self.jpeg_dir = self.root / "JPEGImages"
         self.mask_dir = self.root / "SegmentationClass"
         split_file = self.root / "ImageSets" / "Segmentation" / f"{split}.txt"
+        if not split_file.is_file():
+            raise FileNotFoundError(f"Không tìm thấy tệp chia dữ liệu: {split_file}")
         self.ids = [line.strip() for line in split_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if not self.ids:
+            raise ValueError(f"Tệp chia dữ liệu không chứa mã ảnh: {split_file}")
 
     def __len__(self) -> int:
         return len(self.ids)

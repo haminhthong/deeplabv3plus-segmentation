@@ -57,14 +57,13 @@ VOC_COLORMAP = np.array(
 
 
 def mask_to_color_rgb(mask: np.ndarray, ignore_index: int = 255) -> np.ndarray:
-    """
-    Chuyển đổi một mask số nguyên 2D (H, W) thành một ảnh RGB (H, W, 3).
-    Các pixel thuộc `ignore_index` được ánh xạ thành màu trắng [255, 255, 255].
-    """
-    valid = mask < len(VOC_COLORMAP)
+    """Chuyển mặt nạ nhãn hai chiều thành ảnh màu RGB."""
+    if mask.ndim != 2:
+        raise ValueError(f"Mặt nạ phải có 2 chiều, nhận được hình dạng {mask.shape}")
+
+    valid = (mask >= 0) & (mask < len(VOC_COLORMAP))
     rgb = np.zeros(mask.shape + (3,), dtype=np.uint8)
     rgb[valid] = VOC_COLORMAP[mask[valid]]
     if ignore_index is not None:
         rgb[mask == ignore_index] = [255, 255, 255]
     return rgb
-

@@ -7,8 +7,8 @@ import segmentation_models_pytorch as smp
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torchvision.transforms import functional as TF
 from torchvision import transforms
+from torchvision.transforms import functional as TF
 
 from config import NUM_CLASSES
 
@@ -19,18 +19,26 @@ STD = (0.229, 0.224, 0.225)
 def load_checkpoint_model(path: str | Path, device: torch.device):
     path = Path(path)
     if not path.is_file():
-        raise FileNotFoundError(f"Checkpoint not found: {path}")
+        raise FileNotFoundError(f"Không tìm thấy checkpoint: {path}")
     checkpoint = torch.load(path, map_location=device)
     metadata = checkpoint if isinstance(checkpoint, dict) else {}
     state_dict = metadata.get("model_state_dict", checkpoint)
     encoder = metadata.get("encoder", "resnet50")
-    model = smp.DeepLabV3Plus(encoder_name=encoder, encoder_weights=None, classes=NUM_CLASSES, activation=None)
+    num_classes = int(metadata.get("num_classes", NUM_CLASSES))
+    model = smp.DeepLabV3Plus(
+        encoder_name=encoder,
+        encoder_weights=None,
+        classes=num_classes,
+        activation=None,
+    )
     model.load_state_dict(state_dict)
     model.to(device).eval()
     return model, metadata
 
 
 def prepare_image(image: Image.Image, image_size: int):
+    if image_size <= 0:
+        raise ValueError("Kích thước ảnh đầu vào phải lớn hơn 0")
     original_size = image.size
     scale = min(image_size / image.width, image_size / image.height)
     resized_w, resized_h = max(1, round(image.width * scale)), max(1, round(image.height * scale))
