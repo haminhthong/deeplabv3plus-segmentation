@@ -1,12 +1,39 @@
 # DeepLabV3+ Semantic Segmentation
 
+<<<<<<< HEAD
 [![CI](https://github.com/OWNER/REPOSITORY/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPOSITORY/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
+=======
+Dự án này huấn luyện mô hình `DeepLabV3+` (encoder `ResNet50`) trên bộ dữ liệu Pascal VOC 2012 chưa có sẵn trong thư mục `data/`. Nguồn da ta : https://www.kaggle.com/datasets/gopalbhattrai/pascal-voc-2012-dataset
+>>>>>>> 26f23482a0d6321b1844eca57ac68f9085fe7496
 
 Pipeline phân đoạn ngữ nghĩa Pascal VOC 2012 dùng DeepLabV3+ và PyTorch. Repository gồm huấn luyện, metric, resume checkpoint, trực quan hóa dự đoán và demo Streamlit cho ảnh tải lên.
 
+<<<<<<< HEAD
 > Thay `OWNER/REPOSITORY` trong badge CI sau khi đưa repository lên GitHub.
+=======
+```text
+deeplabv3plus-segmentation/
+├─ data/
+│  ├─ VOC2012_train_val/VOC2012_train_val/
+│  └─ VOC2012_test/VOC2012_test/
+├─ outputs/                      # sinh ra sau khi train/visualize
+│  ├─ deeplabv3plus_voc_best.pth
+│  ├─ train_log.csv
+│  ├─ training_curves.png
+│  └─ viz/
+├─ config.py                     # hằng số chung: NUM_CLASSES, IGNORE_INDEX, VOC_ROOT
+├─ voc_meta.py                   # tên lớp VOC + colormap VOC
+├─ dataset_voc.py                # Dataset Pascal VOC và transform
+├─ train_deeplabv3plus.py        # train DeepLabV3+
+├─ visualize_predictions.py      # vẽ Image/GT/Prediction/Overlay
+├─ plot_training_curves.py       # vẽ đồ thị loss và mIoU
+├─ streamlit_segmentation_ui.py  # giao diện người dùng Streamlit
+├─ requirements.txt
+└─ Hướng dẫn chạy.md
+```
+>>>>>>> 26f23482a0d6321b1844eca57ac68f9085fe7496
 
 ## Kết quả
 
@@ -30,7 +57,11 @@ Khi có kết quả đã xác nhận, cập nhật bảng cùng cấu hình GPU,
 
 ## Cài đặt
 
+<<<<<<< HEAD
 Yêu cầu Python 3.11. Với CUDA, nên cài bản PyTorch phù hợp trước, rồi cài dependency còn lại.
+=======
+### 4. Cài thư viện (Windows)
+>>>>>>> 26f23482a0d6321b1844eca57ac68f9085fe7496
 
 ```bash
 python -m venv .venv
@@ -39,6 +70,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+<<<<<<< HEAD
 Dataset mặc định:
 
 ```text
@@ -48,6 +80,12 @@ data/VOC2012_train_val/VOC2012_train_val/
 └── ImageSets/Segmentation/
     ├── train.txt
     └── val.txt
+=======
+### 5. Huấn luyện mô hình
+do điều kiện thiết bị nên có giới hạn 
+```bash
+python train_deeplabv3plus.py --epochs 40 --batch-size 8 --image-size 320
+>>>>>>> 26f23482a0d6321b1844eca57ac68f9085fe7496
 ```
 
 Có thể chỉ định vị trí khác bằng `--data-root`.
