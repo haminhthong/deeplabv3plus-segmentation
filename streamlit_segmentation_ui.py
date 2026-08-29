@@ -8,18 +8,11 @@ import streamlit as st
 import torch
 from PIL import Image
 
-from config import IGNORE_INDEX, NUM_CLASSES, VOC_ROOT
-from inference import load_checkpoint_model, predict_original_size
+from config import CHECKPOINT_PATH, IGNORE_INDEX, NUM_CLASSES, VOC_ROOT
+from dataset_voc import read_split_ids
+from inference import load_checkpoint_model, overlay_mask, predict_original_size
 from plot_training_curves import read_training_log
 from voc_meta import VOC_CLASS_NAMES, mask_to_color_rgb
-
-
-def overlay_mask(image_rgb: np.ndarray, mask_rgb: np.ndarray, alpha: float = 0.5) -> np.ndarray:
-    alpha = float(np.clip(alpha, 0.0, 1.0))
-    img = image_rgb.astype(np.float32)
-    m = mask_rgb.astype(np.float32)
-    out = img * (1.0 - alpha) + m * alpha
-    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def summarize_present_classes(mask: np.ndarray, min_area_percent: float = 0.1):
@@ -46,12 +39,6 @@ def summarize_present_classes(mask: np.ndarray, min_area_percent: float = 0.1):
     return rows
 
 
-def _get_ids(data_root: Path, split: str):
-    split_file = data_root / "ImageSets" / "Segmentation" / f"{split}.txt"
-    lines = split_file.read_text(encoding="utf-8").splitlines()
-    return [line.strip() for line in lines if line.strip()]
-
-
 @st.cache_resource(show_spinner=False)
 def load_model(checkpoint_path_str: str, device_str: str):
     device = torch.device(device_str)
@@ -66,7 +53,7 @@ def main():
     st.title("DeepLabV3+ - Demo Phân Đoạn Ảnh (Pascal VOC 2012)")
 
     default_data_root = str(VOC_ROOT)
-    default_ckpt = str(Path("outputs") / "deeplabv3plus_voc_best.pth")
+    default_ckpt = str(CHECKPOINT_PATH)
 
     with st.sidebar:
         st.header("Cấu hình")
@@ -74,7 +61,6 @@ def main():
         ckpt_path_str = st.text_input("Checkpoint", value=default_ckpt)
         split = st.selectbox("Split để dự đoán", ["val", "train"], index=0)
 
-        image_size_ui = st.number_input("Image size", min_value=128, max_value=1024, value=320, step=32)
         num_samples = st.slider("Số ảnh hiển thị", min_value=1, max_value=12, value=6, step=1)
         random_seed = st.number_input("Seed chọn ảnh", min_value=0, max_value=10_000, value=42, step=1)
         min_area = st.number_input("Diện tích lớp tối thiểu (%)", min_value=0.0, max_value=10.0, value=0.1, step=0.1)
@@ -102,15 +88,15 @@ def main():
                 st.stop()
             model, encoder, ckpt_image_size = load_model(str(ckpt_path), device_str)
             image = Image.open(uploaded).convert("RGB")
-            pred_mask = predict_original_size(model, image, int(image_size_ui), torch.device(device_str))
-            image_resized = np.array(image)
+            pred_mask = predict_original_size(model, image, ckpt_image_size, torch.device(device_str))
+            image_rgb = np.asarray(image)
             pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
-            pred_overlay = overlay_mask(image_resized, pred_vis, alpha=alpha)
+            pred_overlay = overlay_mask(image_rgb, pred_vis, alpha)
 
             c1, c2, c3 = st.columns(3)
-            c1.image(image_resized, caption="Input", use_container_width=True)
-            c2.image(pred_vis, caption="Prediction (Mask)", use_container_width=True)
-            c3.image(pred_overlay, caption="Overlay", use_container_width=True)
+            c1.image(image_rgb, caption="Ảnh gốc", use_container_width=True)
+            c2.image(pred_vis, caption="Mặt nạ dự đoán", use_container_width=True)
+            c3.image(pred_overlay, caption="Ảnh phủ màu", use_container_width=True)
 
             st.markdown("### Kết quả liệt kê đối tượng (20 lớp VOC)")
             rows = summarize_present_classes(pred_mask, float(min_area))
@@ -122,17 +108,17 @@ def main():
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "class_id": st.column_config.NumberColumn("Class ID", format="%d"),
-                        "class_name": st.column_config.TextColumn("Object"),
-                        "pixels": st.column_config.NumberColumn("Pixels", format="%d"),
-                        "percent": st.column_config.NumberColumn("Area (%)", format="%.2f"),
+                        "class_id": st.column_config.NumberColumn("Mã lớp", format="%d"),
+                        "class_name": st.column_config.TextColumn("Đối tượng"),
+                        "pixels": st.column_config.NumberColumn("Số pixel", format="%d"),
+                        "percent": st.column_config.NumberColumn("Diện tích (%)", format="%.2f"),
                     },
                 )
 
                 top_names = ", ".join([r["class_name"] for r in rows[:10]])
                 st.success(
-                    f"Hoàn tất. Encoder: {encoder} (checkpoint image_size={ckpt_image_size}). "
-                    f"Top objects: {top_names}"
+                    f"Hoàn tất. Encoder: {encoder}, kích thước đầu vào: {ckpt_image_size}. "
+                    f"Các lớp nổi bật: {top_names}"
                 )
 
             with st.expander("Danh sách 20 lớp (VOC)"):
@@ -152,10 +138,7 @@ def main():
                 st.stop()
             model, encoder, ckpt_image_size = load_model(str(ckpt_path), device_str)
 
-            ids = _get_ids(data_root, split)
-            if not ids:
-                st.error(f"Tệp chia dữ liệu không chứa mã ảnh: {split_file}")
-                st.stop()
+            ids = read_split_ids(data_root, split)
             random.seed(int(random_seed))
             chosen = random.sample(ids, k=min(int(num_samples), len(ids)))
 
@@ -170,15 +153,15 @@ def main():
                 gt_mask = np.array(gt_mask_img, dtype=np.int64)
                 gt_vis = mask_to_color_rgb(gt_mask, ignore_index=IGNORE_INDEX)
 
-                pred_mask = predict_original_size(model, image, int(image_size_ui), torch.device(device_str))
+                pred_mask = predict_original_size(model, image, ckpt_image_size, torch.device(device_str))
 
                 pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
-                image_resized = np.array(image)
+                image_rgb = np.asarray(image)
 
                 c1, c2, c3 = st.columns(3)
-                c1.image(image_resized, caption=f"Input ({image_id})", use_container_width=True)
-                c2.image(gt_vis, caption="Ground Truth", use_container_width=True)
-                c3.image(pred_vis, caption="Prediction", use_container_width=True)
+                c1.image(image_rgb, caption=f"Ảnh gốc ({image_id})", use_container_width=True)
+                c2.image(gt_vis, caption="Nhãn thật", use_container_width=True)
+                c3.image(pred_vis, caption="Dự đoán", use_container_width=True)
 
                 st.write("---")
                 progress.progress((i + 1) / len(chosen))
@@ -198,19 +181,19 @@ def main():
             epochs, train_loss, train_miou, val_loss, val_miou = read_training_log(log_path)
             fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-            axes[0].plot(epochs, train_loss, marker="o", label="Train Loss")
-            axes[0].plot(epochs, val_loss, marker="o", label="Val Loss")
+            axes[0].plot(epochs, train_loss, marker="o", label="Huấn luyện")
+            axes[0].plot(epochs, val_loss, marker="o", label="Xác thực")
             axes[0].set_xlabel("Epoch")
             axes[0].set_ylabel("Loss")
-            axes[0].set_title("Loss Curve")
+            axes[0].set_title("Hàm mất mát")
             axes[0].grid(True, alpha=0.3)
             axes[0].legend()
 
-            axes[1].plot(epochs, train_miou, marker="o", label="Train mIoU")
-            axes[1].plot(epochs, val_miou, marker="o", label="Val mIoU")
+            axes[1].plot(epochs, train_miou, marker="o", label="Huấn luyện")
+            axes[1].plot(epochs, val_miou, marker="o", label="Xác thực")
             axes[1].set_xlabel("Epoch")
             axes[1].set_ylabel("mIoU")
-            axes[1].set_title("mIoU Curve")
+            axes[1].set_title("mIoU")
             axes[1].grid(True, alpha=0.3)
             axes[1].legend()
 

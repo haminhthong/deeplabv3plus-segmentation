@@ -72,6 +72,7 @@ Repository không điền số liệu chưa được chạy và xác minh. Sau k
 
 - `outputs/train_log.csv` lưu loss và mIoU theo epoch.
 - `outputs/best_metrics.json` lưu metric chi tiết của checkpoint tốt nhất.
+- `outputs/evaluation.json` lưu kết quả đánh giá độc lập và tốc độ suy luận.
 - `outputs/deeplabv3plus_voc_best.pth` lưu checkpoint tốt nhất.
 
 | Model | Backbone | Input | Loss | Val mIoU | mIoU không BG | Mean Dice | Pixel Accuracy |
@@ -235,6 +236,15 @@ Nhờ đó thí nghiệm có thể tiếp tục và được truy vết chính x
 
 `best_metrics.json` dùng `null` cho lớp không xuất hiện thay vì ghi giá trị không hợp lệ.
 
+Đánh giá độc lập từ checkpoint:
+
+```bash
+python evaluate.py --checkpoint outputs/deeplabv3plus_voc_best.pth --split val
+```
+
+Lệnh này xuất mIoU, Dice, pixel accuracy, confusion matrix, độ trễ và FPS vào
+`outputs/evaluation.json`.
+
 ## Trực quan hóa
 
 Checkpoint đã huấn luyện là bắt buộc. Encoder pretrained ImageNet không đồng nghĩa decoder segmentation đã được huấn luyện.
@@ -300,6 +310,7 @@ Tab này cần cả checkpoint và dataset. Dataset chỉ được kiểm tra kh
 .
 ├── config.py
 ├── dataset_voc.py
+├── evaluate.py
 ├── inference.py
 ├── metrics.py
 ├── plot_training_curves.py
@@ -316,6 +327,7 @@ Tab này cần cả checkpoint và dataset. Dataset chỉ được kiểm tra kh
 |---|---|
 | `config.py` | Hằng số số lớp, ignore index và data root |
 | `dataset_voc.py` | Dataset và joint transforms ảnh–mask |
+| `evaluate.py` | Đánh giá metric và tốc độ suy luận từ checkpoint |
 | `inference.py` | Load checkpoint, preprocess giữ tỷ lệ và dự đoán kích thước gốc |
 | `metrics.py` | Confusion matrix và các metric segmentation |
 | `train_deeplabv3plus.py` | Training, validation, AMP, resume và checkpoint |

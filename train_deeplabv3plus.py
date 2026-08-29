@@ -1,21 +1,30 @@
 import argparse
-import json
-import os
 import random
 import subprocess
 from pathlib import Path
 
 import numpy as np
-import segmentation_models_pytorch as smp
 import torch
-import torch.nn as nn
+from segmentation_models_pytorch.losses import DiceLoss
+from torch import nn
 from torch.utils.data import DataLoader
 
-from config import IGNORE_INDEX as VOC_IGNORE_INDEX
-from config import NUM_CLASSES as VOC_NUM_CLASSES
-from config import VOC_ROOT
-from dataset_voc import VOCSegmentationDataset, get_train_transforms, get_val_transforms
-from metrics import SegmentationMetrics
+from config import (
+    IGNORE_INDEX,
+    IMAGE_SIZE,
+    NUM_CLASSES,
+    OUTPUT_DIR,
+    VOC_ROOT,
+    configure_console,
+)
+from dataset_voc import (
+    VOCSegmentationDataset,
+    get_train_transforms,
+    get_val_transforms,
+    validate_voc_dataset,
+)
+from inference import build_model
+from metrics import SegmentationMetrics, save_metrics
 
 
 def set_seed(seed: int) -> None:
@@ -70,38 +79,30 @@ def run_epoch(
     return avg_loss, metrics.compute()
 
 
-def build_model(num_classes: int, encoder: str, encoder_weights: str):
-    return smp.DeepLabV3Plus(
-        encoder_name=encoder,
-        encoder_weights=encoder_weights,
-        classes=num_classes,
-        activation=None,
-    )
-
-
 class CombinedLoss(nn.Module):
     def __init__(self, ignore_index):
         super().__init__()
         self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
         # Hàm mất mát Dice bỏ qua vùng nhãn 255; lớp nền của Pascal VOC có mã 0.
-        self.dice = smp.losses.DiceLoss(mode="multiclass", ignore_index=ignore_index)
+        self.dice = DiceLoss(mode="multiclass", ignore_index=ignore_index)
 
     def forward(self, logits, masks):
         return self.ce(logits, masks) + 0.5 * self.dice(logits, masks)
 
 
 def main():
+    configure_console()
     parser = argparse.ArgumentParser(description="Huấn luyện DeepLabV3+ trên Pascal VOC")
     parser.add_argument("--data-root", type=str, default=str(VOC_ROOT))
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--image-size", type=int, default=320)
+    parser.add_argument("--image-size", type=int, default=IMAGE_SIZE)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--encoder", type=str, default="resnet50")
     parser.add_argument("--encoder-weights", type=str, default="imagenet")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=str, default="outputs")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--resume", type=Path, default=None, help="Tiếp tục từ checkpoint")
     parser.add_argument("--patience", type=int, default=0, help="Dừng sớm; 0 là tắt")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
@@ -123,7 +124,8 @@ def main():
     print(f"Thiết bị: {device}")
 
     data_root = Path(args.data_root)
-    output_dir = Path(args.output_dir)
+    validate_voc_dataset(data_root)
+    output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = output_dir / "deeplabv3plus_voc_best.pth"
     resume_checkpoint = None
@@ -133,10 +135,10 @@ def main():
         resume_checkpoint = torch.load(args.resume, map_location=device)
         if not isinstance(resume_checkpoint, dict) or "model_state_dict" not in resume_checkpoint:
             parser.error("Checkpoint dùng để tiếp tục huấn luyện không đúng định dạng")
-        checkpoint_classes = int(resume_checkpoint.get("num_classes", VOC_NUM_CLASSES))
-        if checkpoint_classes != VOC_NUM_CLASSES:
+        checkpoint_classes = int(resume_checkpoint.get("num_classes", NUM_CLASSES))
+        if checkpoint_classes != NUM_CLASSES:
             parser.error(
-                f"Checkpoint có {checkpoint_classes} lớp, nhưng cấu hình hiện tại có {VOC_NUM_CLASSES} lớp"
+                f"Checkpoint có {checkpoint_classes} lớp, nhưng cấu hình hiện tại có {NUM_CLASSES} lớp"
             )
         args.encoder = resume_checkpoint.get("encoder", args.encoder)
         args.encoder_weights = resume_checkpoint.get("encoder_weights", args.encoder_weights)
@@ -169,8 +171,8 @@ def main():
     )
 
     initial_weights = None if resume_checkpoint is not None else args.encoder_weights
-    model = build_model(VOC_NUM_CLASSES, args.encoder, initial_weights).to(device)
-    criterion = CombinedLoss(ignore_index=VOC_IGNORE_INDEX)
+    model = build_model(args.encoder, initial_weights, NUM_CLASSES).to(device)
+    criterion = CombinedLoss(ignore_index=IGNORE_INDEX)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
@@ -204,13 +206,13 @@ def main():
             criterion,
             optimizer,
             device,
-            VOC_NUM_CLASSES,
-            VOC_IGNORE_INDEX,
+            NUM_CLASSES,
+            IGNORE_INDEX,
             True,
             active_scaler,
         )
         val_loss, val_metrics = run_epoch(
-            model, val_loader, criterion, optimizer, device, VOC_NUM_CLASSES, VOC_IGNORE_INDEX, train_mode=False
+            model, val_loader, criterion, optimizer, device, NUM_CLASSES, IGNORE_INDEX, train_mode=False
         )
         train_miou, val_miou = train_metrics["mean_iou"], val_metrics["mean_iou"]
 
@@ -245,8 +247,8 @@ def main():
                     "image_size": args.image_size,
                     "best_val_miou": best_miou,
                     "loss": "cross_entropy + 0.5 * dice",
-                    "num_classes": VOC_NUM_CLASSES,
-                    "ignore_index": VOC_IGNORE_INDEX,
+                    "num_classes": NUM_CLASSES,
+                    "ignore_index": IGNORE_INDEX,
                     "class_mapping": "Pascal VOC 2012",
                     "train_args": {
                         key: str(value) if isinstance(value, Path) else value
@@ -257,12 +259,7 @@ def main():
                 ckpt_path,
             )
             print(f"Đã lưu checkpoint tốt nhất: {ckpt_path}")
-            serializable = {k: v for k, v in val_metrics.items() if k != "confusion_matrix"}
-            for key in ("per_class_iou", "per_class_dice"):
-                serializable[key] = [None if np.isnan(value) else float(value) for value in serializable[key]]
-            (output_dir / "best_metrics.json").write_text(
-                json.dumps(serializable, indent=2, allow_nan=False), encoding="utf-8"
-            )
+            save_metrics(val_metrics, output_dir / "best_metrics.json")
         else:
             stale_epochs += 1
 
@@ -275,5 +272,4 @@ def main():
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     main()

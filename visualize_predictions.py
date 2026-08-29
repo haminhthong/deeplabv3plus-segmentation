@@ -9,19 +9,20 @@ import numpy as np
 import torch
 from PIL import Image
 
-from config import IGNORE_INDEX, NUM_CLASSES, VOC_ROOT
+from config import CHECKPOINT_PATH, IGNORE_INDEX, VOC_ROOT, configure_console
 from dataset_voc import VOCSegmentationDataset
-from inference import load_checkpoint_model, predict_original_size
+from inference import load_checkpoint_model, overlay_mask, predict_original_size
 from voc_meta import mask_to_color_rgb
 
 
 def main():
+    configure_console()
     parser = argparse.ArgumentParser(description="Trực quan hóa dự đoán trên Pascal VOC")
     parser.add_argument("--data-root", type=Path, default=VOC_ROOT)
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("outputs") / "deeplabv3plus_voc_best.pth",
+        default=CHECKPOINT_PATH,
     )
     parser.add_argument("--split", default="val", choices=("train", "val"))
     parser.add_argument(
@@ -62,10 +63,11 @@ def main():
         raw_img = Image.open(ds.jpeg_dir / f"{sid}.jpg").convert("RGB")
         gt = np.array(Image.open(ds.mask_dir / f"{sid}.png"), dtype=np.int64)
         pred = predict_original_size(model, raw_img, image_size, device)
-        overlay = (
-            np.array(raw_img) * 0.55
-            + mask_to_color_rgb(pred, IGNORE_INDEX) * 0.45
-        ).clip(0, 255).astype(np.uint8)
+        overlay = overlay_mask(
+            np.asarray(raw_img),
+            mask_to_color_rgb(pred, IGNORE_INDEX),
+            alpha=0.45,
+        )
 
         fig, axes = plt.subplots(1, 4, figsize=(16, 4))
         axes[0].imshow(raw_img)

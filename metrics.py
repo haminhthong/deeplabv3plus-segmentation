@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -57,3 +60,16 @@ class SegmentationMetrics:
             "pixel_accuracy": float(correct.sum() / total) if total else 0.0,
             "mean_class_accuracy": float(np.nanmean(class_accuracy)) if np.any(~np.isnan(class_accuracy)) else 0.0,
         }
+
+
+def save_metrics(metrics: dict[str, object], path: str | Path) -> None:
+    """Lưu metric thành JSON hợp lệ, dùng null cho lớp không xuất hiện."""
+    output = {}
+    for key, value in metrics.items():
+        if isinstance(value, np.ndarray) and value.ndim == 2:
+            output[key] = value.tolist()
+        elif isinstance(value, np.ndarray):
+            output[key] = [None if np.isnan(item) else float(item) for item in value]
+        else:
+            output[key] = value
+    Path(path).write_text(json.dumps(output, indent=2, allow_nan=False), encoding="utf-8")

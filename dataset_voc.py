@@ -10,13 +10,51 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from config import IGNORE_INDEX, IMAGE_MEAN, IMAGE_STD
+
+
+def read_split_ids(root: Path | str, split: str) -> list[str]:
+    """Đọc danh sách mã ảnh và kiểm tra dữ liệu cơ bản."""
+    root = Path(root)
+    split_file = root / "ImageSets" / "Segmentation" / f"{split}.txt"
+    if not split_file.is_file():
+        raise FileNotFoundError(f"Không tìm thấy tệp chia dữ liệu: {split_file}")
+    ids = [line.strip() for line in split_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not ids:
+        raise ValueError(f"Tệp chia dữ liệu không chứa mã ảnh: {split_file}")
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"Tệp chia dữ liệu chứa mã ảnh trùng lặp: {split_file}")
+    return ids
+
+
+def validate_voc_dataset(root: Path | str) -> None:
+    """Kiểm tra split, file ảnh/mặt nạ và rò rỉ giữa train với val."""
+    root = Path(root)
+    train_ids = read_split_ids(root, "train")
+    val_ids = read_split_ids(root, "val")
+    overlap = set(train_ids).intersection(val_ids)
+    if overlap:
+        raise ValueError(f"Train và val bị trùng {len(overlap)} ảnh")
+
+    missing = []
+    for image_id in train_ids + val_ids:
+        for path in (
+            root / "JPEGImages" / f"{image_id}.jpg",
+            root / "SegmentationClass" / f"{image_id}.png",
+        ):
+            if not path.is_file():
+                missing.append(path)
+    if missing:
+        preview = "\n".join(str(path) for path in missing[:10])
+        raise FileNotFoundError(f"Thiếu {len(missing)} file dữ liệu, ví dụ:\n{preview}")
+
 
 class JointTransform:
     def __init__(self, h: int, w: int) -> None:
         self.h = h
         self.w = w
         self.to_tensor = transforms.ToTensor()
-        self.normalize = transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+        self.normalize = transforms.Normalize(IMAGE_MEAN, IMAGE_STD)
 
     def __call__(self, image: Image.Image, mask: Image.Image):
         image, mask = resize_and_pad(image, mask, self.h, self.w)
@@ -30,7 +68,7 @@ class TrainJointTransform:
         self.h = h
         self.w = w
         self.color_jitter = transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1)
-        self.normalize = transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+        self.normalize = transforms.Normalize(IMAGE_MEAN, IMAGE_STD)
 
     def __call__(self, image: Image.Image, mask: Image.Image):
         # Thay đổi tỷ lệ ngẫu nhiên rồi cắt hoặc đệm để không làm méo đối tượng.
@@ -43,7 +81,7 @@ class TrainJointTransform:
         pad_bottom = max(0, self.h - scaled_h)
         if pad_right or pad_bottom:
             image = TF.pad(image, [0, 0, pad_right, pad_bottom], fill=0)
-            mask = TF.pad(mask, [0, 0, pad_right, pad_bottom], fill=255)
+            mask = TF.pad(mask, [0, 0, pad_right, pad_bottom], fill=IGNORE_INDEX)
         top, left, _, _ = transforms.RandomCrop.get_params(image, (self.h, self.w))
         image = TF.crop(image, top, left, self.h, self.w)
         mask = TF.crop(mask, top, left, self.h, self.w)
@@ -77,7 +115,7 @@ class TrainJointTransform:
                 scale=scale,
                 shear=0,
                 interpolation=transforms.InterpolationMode.NEAREST,
-                fill=255,
+                fill=IGNORE_INDEX,
             )
 
         # Chỉ thay đổi màu ảnh vì mặt nạ chứa mã lớp.
@@ -110,7 +148,7 @@ def resize_and_pad(image: Image.Image, mask: Image.Image, h: int, w: int):
     pad_left = (w - new_w) // 2
     pad_top = (h - new_h) // 2
     padding = [pad_left, pad_top, w - new_w - pad_left, h - new_h - pad_top]
-    return TF.pad(image, padding, fill=0), TF.pad(mask, padding, fill=255)
+    return TF.pad(image, padding, fill=0), TF.pad(mask, padding, fill=IGNORE_INDEX)
 
 
 class VOCSegmentationDataset(Dataset):
@@ -121,12 +159,7 @@ class VOCSegmentationDataset(Dataset):
 
         self.jpeg_dir = self.root / "JPEGImages"
         self.mask_dir = self.root / "SegmentationClass"
-        split_file = self.root / "ImageSets" / "Segmentation" / f"{split}.txt"
-        if not split_file.is_file():
-            raise FileNotFoundError(f"Không tìm thấy tệp chia dữ liệu: {split_file}")
-        self.ids = [line.strip() for line in split_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if not self.ids:
-            raise ValueError(f"Tệp chia dữ liệu không chứa mã ảnh: {split_file}")
+        self.ids = read_split_ids(self.root, split)
 
     def __len__(self) -> int:
         return len(self.ids)

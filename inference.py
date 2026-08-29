@@ -10,10 +10,21 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import functional as TF
 
-from config import NUM_CLASSES
+from config import IMAGE_MEAN, IMAGE_STD, NUM_CLASSES
 
-MEAN = (0.485, 0.456, 0.406)
-STD = (0.229, 0.224, 0.225)
+
+def build_model(
+    encoder: str = "resnet50",
+    encoder_weights: str | None = "imagenet",
+    num_classes: int = NUM_CLASSES,
+):
+    """Khởi tạo DeepLabV3+ theo một cấu hình thống nhất."""
+    return smp.DeepLabV3Plus(
+        encoder_name=encoder,
+        encoder_weights=encoder_weights,
+        classes=num_classes,
+        activation=None,
+    )
 
 
 def load_checkpoint_model(path: str | Path, device: torch.device):
@@ -25,12 +36,7 @@ def load_checkpoint_model(path: str | Path, device: torch.device):
     state_dict = metadata.get("model_state_dict", checkpoint)
     encoder = metadata.get("encoder", "resnet50")
     num_classes = int(metadata.get("num_classes", NUM_CLASSES))
-    model = smp.DeepLabV3Plus(
-        encoder_name=encoder,
-        encoder_weights=None,
-        classes=num_classes,
-        activation=None,
-    )
+    model = build_model(encoder, None, num_classes)
     model.load_state_dict(state_dict)
     model.to(device).eval()
     return model, metadata
@@ -45,8 +51,15 @@ def prepare_image(image: Image.Image, image_size: int):
     resized = TF.resize(image, (resized_h, resized_w), interpolation=transforms.InterpolationMode.BILINEAR)
     left, top = (image_size - resized_w) // 2, (image_size - resized_h) // 2
     padded = TF.pad(resized, [left, top, image_size - resized_w - left, image_size - resized_h - top], fill=0)
-    tensor = TF.normalize(TF.to_tensor(padded), MEAN, STD)
+    tensor = TF.normalize(TF.to_tensor(padded), IMAGE_MEAN, IMAGE_STD)
     return tensor, (left, top, resized_w, resized_h), original_size
+
+
+def overlay_mask(image: np.ndarray, mask: np.ndarray, alpha: float = 0.5) -> np.ndarray:
+    """Phủ mặt nạ màu lên ảnh RGB."""
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    output = image.astype(np.float32) * (1 - alpha) + mask.astype(np.float32) * alpha
+    return np.clip(output, 0, 255).astype(np.uint8)
 
 
 @torch.inference_mode()

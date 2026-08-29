@@ -4,6 +4,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
+from config import configure_console
+
 
 def read_training_log(csv_path: Path):
     epochs = []
@@ -30,6 +32,7 @@ def read_training_log(csv_path: Path):
 
 
 def main():
+    configure_console()
     parser = argparse.ArgumentParser(description="Vẽ đồ thị từ tệp train_log.csv")
     parser.add_argument("--log-path", type=str, default="outputs/train_log.csv")
     parser.add_argument("--output-path", type=str, default="outputs/training_curves.png")
@@ -45,21 +48,21 @@ def main():
 
     epochs, train_loss, train_miou, val_loss, val_miou = read_training_log(log_path)
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    _, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    axes[0].plot(epochs, train_loss, marker="o", label="Train Loss")
-    axes[0].plot(epochs, val_loss, marker="o", label="Val Loss")
+    axes[0].plot(epochs, train_loss, marker="o", label="Huấn luyện")
+    axes[0].plot(epochs, val_loss, marker="o", label="Xác thực")
     axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
-    axes[0].set_title("Loss Curve")
+    axes[0].set_title("Hàm mất mát")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
-    axes[1].plot(epochs, train_miou, marker="o", label="Train mIoU")
-    axes[1].plot(epochs, val_miou, marker="o", label="Val mIoU")
+    axes[1].plot(epochs, train_miou, marker="o", label="Huấn luyện")
+    axes[1].plot(epochs, val_miou, marker="o", label="Xác thực")
     axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("mIoU")
-    axes[1].set_title("mIoU Curve")
+    axes[1].set_title("mIoU")
     axes[1].grid(True, alpha=0.3)
     axes[1].legend()
 
