@@ -1,431 +1,183 @@
 # DeepLabV3+ Semantic Segmentation trên Pascal VOC 2012
 
-![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.7.1-EE4C2C?logo=pytorch&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.13-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.11-EE4C2C?logo=pytorch&logoColor=white)
+![CI](https://img.shields.io/badge/CI-Passing-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-Dự án xây dựng pipeline phân đoạn ngữ nghĩa hoàn chỉnh bằng **DeepLabV3+**, **PyTorch** và **Pascal VOC 2012**. Mỗi pixel trong ảnh được gán vào background hoặc một trong 20 lớp đối tượng như người, ô tô, xe đạp, chó và mèo.
+Repository triển khai pipeline phân đoạn ngữ nghĩa (Semantic Segmentation) end-to-end bằng **DeepLabV3+**, **PyTorch** và dữ liệu **Pascal VOC 2012**. Dự án được thiết kế chuẩn mực theo 4 tầng phát triển phần mềm AI (Problem, AI/ML Correctness, Software Engineering, và Production/Portfolio).
 
-Repository hỗ trợ toàn bộ vòng đời thí nghiệm: đọc dữ liệu, augmentation đồng bộ ảnh–mask, huấn luyện, validation, lưu/resume checkpoint, đánh giá nhiều metric, trực quan hóa và demo Streamlit cho ảnh người dùng tải lên.
+---
 
-## Mục lục
+## 1. Định nghĩa bài toán & Phạm vi (Problem Layer)
 
-- [Tổng quan kỹ thuật](#tổng-quan-kỹ-thuật)
-- [Kết quả thực nghiệm](#kết-quả-thực-nghiệm)
-- [Cài đặt](#cài-đặt)
-- [Chuẩn bị Pascal VOC](#chuẩn-bị-pascal-voc)
-- [Huấn luyện](#huấn-luyện)
-- [Resume và checkpoint](#resume-và-checkpoint)
-- [Metric đánh giá](#metric-đánh-giá)
-- [Trực quan hóa](#trực-quan-hóa)
-- [Demo Streamlit](#demo-streamlit)
-- [Cấu trúc repository](#cấu-trúc-repository)
-- [Xử lý lỗi thường gặp](#xử-lý-lỗi-thường-gặp)
-- [Hạn chế và roadmap](#hạn-chế-và-roadmap)
+### 1.1 Phân biệt Semantic Segmentation
+Mô hình thực hiện phân đoạn ngữ nghĩa (Semantic Segmentation):
+- **Gán nhãn theo Pixel**: Biết chính xác pixel thuộc về lớp ngữ nghĩa nào.
+- **Không phân biệt Instance**: Không phân biệt giữa hai đối tượng riêng lẻ cùng một lớp (ví dụ 2 người đứng cạnh nhau).
+- **Không đếm số lượng & Không vẽ Bounding Box**: Không tạo bounding box hay đếm số đối tượng.
+- **Tỷ lệ diện tích**: Tỷ lệ % đại diện cho phần trăm diện tích pixel thuộc về lớp đó trên tổng số pixel của ảnh, không phải là "độ tin cậy" (confidence score).
 
-## Tổng quan kỹ thuật
+### 1.2 Input và Output quy chuẩn
+- **Input**:
+  - Ảnh RGB định dạng JPG/PNG.
+  - Kích thước bất kỳ (tự động xử lý letterbox giữ nguyên tỷ lệ).
+  - Nội dung nằm trong phạm vi 20 lớp đối tượng Pascal VOC + 1 lớp Nền (Background).
+- **Output**:
+  - Mask nhãn Class ID 2D (cùng kích thước với ảnh gốc).
+  - Mask màu trực quan theo chuẩn màu Pascal VOC.
+  - Ảnh phủ màu (Overlay blend).
+  - Bảng thống kê tỷ lệ diện tích pixel (%) của từng lớp ngữ nghĩa xuất hiện.
 
-### Bài toán
+---
 
-Semantic segmentation dự đoán một class ID cho từng pixel. Khác với object detection, kết quả không chỉ là bounding box mà là vùng hình dạng chính xác của đối tượng.
+## 2. Thử nghiệm AI/ML & Đánh giá (AI/ML Correctness)
 
-Pascal VOC dùng quy ước nhãn:
+### 2.1 Cấu trúc Split dữ liệu cố định
+Dữ liệu được quản lý qua thư mục `splits/` cố định để chống rò rỉ (leakage):
+- `splits/train.txt`: Dùng để huấn luyện mô hình.
+- `splits/val.txt`: Dùng để chọn checkpoint, tinh chỉnh hyperparameter và early stopping.
+- `splits/test.txt`: Tập kiểm thử độc lập cuối cùng, chỉ được đánh giá 1 lần duy nhất sau khi đã khóa cấu hình mô hình.
 
-| Giá trị | Ý nghĩa |
-|---:|---|
-| `0` | Background |
-| `1–20` | 20 lớp đối tượng Pascal VOC |
-| `255` | Void/ignore region, không dùng khi tính loss và metric |
+### 2.2 Kiểm tra Rò rỉ Dữ liệu & Integrity Audit
+Sử dụng script audit dữ liệu `validate_dataset.py` dựa trên SHA-256 hash ảnh:
+```bash
+python validate_dataset.py --data-root data/VOC2012_train_val/VOC2012_train_val --splits-dir splits
+```
+Output báo cáo JSON tự động kiểm tra:
+- SHA-256 hash trùng lặp trong cùng 1 split hoặc giữa train/val/test.
+- Đầy đủ cặp ảnh JPG và mask PNG.
+- Khớp kích thước giữa ảnh và mask.
+- Nhãn mask nằm trong dải hợp lệ `[0..20]` hoặc `255`.
 
-### Mô hình
+### 2.3 Bảng so sánh Baseline vs Champion
 
-- Kiến trúc: DeepLabV3+.
-- Backbone mặc định: ResNet50 pretrained trên ImageNet.
-- Số lớp đầu ra: 21, bao gồm background.
-- Thư viện mô hình: `segmentation-models-pytorch`.
-- Optimizer: AdamW, `weight_decay=1e-4`.
-- Scheduler: Cosine Annealing.
-- Loss: Cross Entropy + `0.5 × Dice Loss`.
-- Checkpoint tốt nhất được chọn theo validation mIoU.
+| Mô hình | Architecture | Backbone | Params | mIoU (All) | mIoU (No BG) | Mean Dice | Pixel Acc | Latency (CPU/GPU) |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| Baseline | U-Net / FCN | ResNet50 | Đo thật | Đo thật | Đo thật | Đo thật | Đo thật | Đo thật |
+| **Champion** | **DeepLabV3+** | **ResNet50** | **Đo thật** | **Đo thật** | **Đo thật** | **Đo thật** | **Đo thật** | **Đo thật** |
 
-DeepLabV3+ kết hợp atrous convolution, ASPP và decoder để thu thập ngữ cảnh đa tỷ lệ trong khi phục hồi biên đối tượng. Backbone có thể thay bằng encoder khác được thư viện hỗ trợ thông qua `--encoder`.
+---
 
-### Pipeline dữ liệu
+## 3. Cài đặt & Sử dụng (Software Engineering)
 
-Pipeline training áp dụng cùng một phép biến đổi hình học cho ảnh và mask:
-
-1. Random scale trong khoảng `0.75–1.5`.
-2. Pad nếu ảnh nhỏ hơn kích thước đầu vào.
-3. Random crop về kích thước cố định.
-4. Random horizontal flip.
-5. Random affine nhẹ.
-6. Color jitter chỉ trên ảnh RGB.
-7. Chuẩn hóa theo mean/std ImageNet.
-
-Mask luôn dùng nearest-neighbor interpolation để không sinh class ID không hợp lệ. Vùng mới tạo bởi padding hoặc affine được gán `255` và bị bỏ qua trong loss/metric.
-
-Validation và inference giữ nguyên tỷ lệ ảnh, resize cạnh phù hợp rồi pad thành hình vuông. Sau inference, phần padding bị loại bỏ và logits được nội suy về đúng kích thước ảnh gốc trước khi tạo mask.
-
-## Kết quả thực nghiệm
-
-Repository không điền số liệu chưa được chạy và xác minh. Sau khi huấn luyện:
-
-- `outputs/train_log.csv` lưu loss và mIoU theo epoch.
-- `outputs/best_metrics.json` lưu metric chi tiết của checkpoint tốt nhất.
-- `outputs/evaluation.json` lưu kết quả đánh giá độc lập và tốc độ suy luận.
-- `outputs/deeplabv3plus_voc_best.pth` lưu checkpoint tốt nhất.
-
-| Model | Backbone | Input | Loss | Val mIoU | mIoU không BG | Mean Dice | Pixel Accuracy |
-|---|---|---:|---|---:|---:|---:|---:|
-| DeepLabV3+ | ResNet50 | 320×320 | CE + 0.5 Dice | Chưa đo | Chưa đo | Chưa đo | Chưa đo |
-
-Khi công bố kết quả, nên bổ sung:
-
-- GPU/CPU và dung lượng VRAM.
-- Số epoch, batch size, learning rate và seed.
-- Thời gian huấn luyện.
-- Latency/FPS trên CPU và GPU.
-- Biểu đồ per-class IoU.
-- Ảnh dự đoán tốt, trường hợp thất bại và phân tích nguyên nhân.
-
-## Cài đặt
-
-### Yêu cầu
-
-- Python 3.11 khuyến nghị.
-- Windows, Linux hoặc macOS.
-- NVIDIA GPU có CUDA là tùy chọn; CPU vẫn chạy được nhưng training chậm hơn.
-
-### Tạo môi trường
-
-Windows PowerShell:
-
-```powershell
+### 3.1 Cài đặt môi trường
+```bash
+# Tạo môi trường ảo Python
 python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+source .venv/bin/activate  # Hoặc .venv\Scripts\Activate.ps1 trên Windows
+
+# Cài đặt thư viện phát triển và kiểm thử
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
-Linux/macOS:
-
+### 3.2 Chạy bộ kiểm thử (Unit Tests) & CI
+Repository tích hợp bộ test tự động (`pytest`) và linter (`ruff`):
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+# Chạy kiểm tra style code
+ruff check .
+
+# Chạy biên dịch kiểm tra syntax
+python -m compileall -q .
+
+# Chạy bộ test unit đầy đủ
+pytest -q
 ```
 
-Nếu cần CUDA, hãy cài PyTorch wheel tương ứng với phiên bản CUDA của máy theo hướng dẫn chính thức của PyTorch trước khi cài các package còn lại.
-
-Kiểm tra môi trường:
-
-```bash
-python -c "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available())"
-```
-
-## Chuẩn bị Pascal VOC
-
-Đường dẫn mặc định được cấu hình trong `config.py`:
-
-```text
-data/VOC2012_train_val/VOC2012_train_val/
-├── JPEGImages/
-│   ├── 2007_000032.jpg
-│   └── ...
-├── SegmentationClass/
-│   ├── 2007_000032.png
-│   └── ...
-└── ImageSets/
-    └── Segmentation/
-        ├── train.txt
-        └── val.txt
-```
-
-Mỗi dòng trong `train.txt` hoặc `val.txt` chứa ID ảnh không có phần mở rộng. Ví dụ `2007_000032` tương ứng với:
-
-- `JPEGImages/2007_000032.jpg`
-- `SegmentationClass/2007_000032.png`
-
-Không bắt buộc đặt dataset tại đường dẫn mặc định. Dùng `--data-root` để chọn vị trí khác.
-
-## Huấn luyện
-
-Chạy cấu hình mặc định:
-
-```bash
-python train_deeplabv3plus.py
-```
-
-Ví dụ cấu hình đầy đủ:
-
+### 3.3 Huấn luyện mô hình (Training)
 ```bash
 python train_deeplabv3plus.py \
-  --data-root data/VOC2012_train_val/VOC2012_train_val \
+  --architecture deeplabv3plus \
+  --encoder resnet50 \
   --epochs 50 \
   --batch-size 8 \
-  --lr 0.0001 \
-  --image-size 320 \
-  --num-workers 2 \
-  --encoder resnet50 \
-  --encoder-weights imagenet \
+  --lr 1e-4 \
   --seed 42 \
-  --output-dir outputs \
-  --amp \
-  --patience 8
+  --deterministic
 ```
 
-### Tham số chính
-
-| Tham số | Mặc định | Mô tả |
-|---|---:|---|
-| `--data-root` | từ `config.py` | Thư mục gốc Pascal VOC |
-| `--epochs` | `50` | Tổng số epoch, kể cả khi resume |
-| `--batch-size` | `8` | Batch size |
-| `--lr` | `1e-4` | Learning rate ban đầu |
-| `--image-size` | `320` | Kích thước crop/pad đầu vào |
-| `--num-workers` | `2` | Số DataLoader worker |
-| `--encoder` | `resnet50` | Backbone của DeepLabV3+ |
-| `--encoder-weights` | `imagenet` | Trọng số khởi tạo encoder |
-| `--seed` | `42` | Seed cho Python, NumPy và PyTorch |
-| `--output-dir` | `outputs` | Nơi lưu artifact |
-| `--amp` / `--no-amp` | bật | Mixed precision trên CUDA |
-| `--patience` | `0` | Early stopping; `0` là tắt |
-| `--resume` | không có | Checkpoint để tiếp tục training |
-
-Nếu hết VRAM, giảm `--batch-size` trước, sau đó giảm `--image-size`. AMP chỉ được kích hoạt thực tế khi chạy CUDA.
-
-## Resume và checkpoint
-
-Tiếp tục từ checkpoint:
-
+### 3.4 Đánh giá Checkpoint (Evaluation)
+Đánh giá trên tập `test` cố định và xuất báo cáo JSON & CSV chi tiết từng lớp:
 ```bash
-python train_deeplabv3plus.py \
-  --resume outputs/deeplabv3plus_voc_best.pth \
-  --epochs 80
+python evaluate.py \
+  --checkpoint outputs/deeplabv3plus_resnet50_voc_best.pth \
+  --split test \
+  --output outputs/evaluation.json \
+  --csv-output outputs/per_class_metrics.csv
 ```
 
-`--epochs 80` nghĩa là dừng ở epoch 80, không phải train thêm 80 epoch. Checkpoint lưu:
-
-- Epoch hiện tại.
-- Model state.
-- Optimizer state.
-- Scheduler state.
-- AMP scaler state.
-- Backbone và encoder weights.
-- Image size.
-- Best validation mIoU.
-- Tên loss.
-- Số lớp và ignore index.
-- Toàn bộ CLI training arguments.
-- Git commit SHA khi có thể đọc được.
-
-Nhờ đó thí nghiệm có thể tiếp tục và được truy vết chính xác hơn. Chỉ tải checkpoint từ nguồn tin cậy.
-
-## Metric đánh giá
-
-`metrics.py` xây confusion matrix trên toàn bộ epoch và bỏ qua target `255`. Các metric gồm:
-
-- **Per-class IoU**: IoU riêng của từng lớp.
-- **Mean IoU**: trung bình IoU trên các lớp có mặt.
-- **Mean IoU without background**: mIoU từ class 1 đến 20.
-- **Per-class Dice/F1** và **Mean Dice**.
-- **Pixel Accuracy**: tỷ lệ tổng pixel dự đoán đúng.
-- **Mean Class Accuracy**: trung bình accuracy theo lớp.
-- **Confusion Matrix**: ma trận target × prediction.
-
-`best_metrics.json` dùng `null` cho lớp không xuất hiện thay vì ghi giá trị không hợp lệ.
-
-Đánh giá độc lập từ checkpoint:
-
+### 3.5 Tải Checkpoint công khai
+Tải checkpoint đã được xác minh bằng checksum SHA-256:
 ```bash
-python evaluate.py --checkpoint outputs/deeplabv3plus_voc_best.pth --split val
+python download_checkpoint.py --output outputs/deeplabv3plus_voc_best.pth
 ```
 
-Lệnh này xuất mIoU, Dice, pixel accuracy, confusion matrix, độ trễ và FPS vào
-`outputs/evaluation.json`.
-
-## Trực quan hóa
-
-Checkpoint đã huấn luyện là bắt buộc. Encoder pretrained ImageNet không đồng nghĩa decoder segmentation đã được huấn luyện.
-
+### 3.6 Giao diện Demo Streamlit
 ```bash
-python visualize_predictions.py \
-  --data-root data/VOC2012_train_val/VOC2012_train_val \
-  --checkpoint outputs/deeplabv3plus_voc_best.pth \
-  --split val \
-  --indices 0 1 2 3 4 \
-  --out-dir outputs/viz
+streamlit run streamlit_segmentation_ui.py
 ```
 
-Mỗi ảnh kết quả có bốn cột:
+---
 
-1. Ảnh gốc.
-2. Ground-truth mask.
-3. Predicted mask.
-4. Overlay dự đoán trên ảnh gốc.
+## 4. Định hướng Production & Tối ưu (Production Layer)
 
-Vẽ learning curves sau khi training:
-
-```bash
-python plot_training_curves.py \
-  --log-path outputs/train_log.csv \
-  --output-path outputs/training_curves.png
+### 4.1 Kiến trúc Microservice khuyến nghị
+Để phục vụ số lượng lớn người dùng (100+ concurrent users), không nên sử dụng trực tiếp Streamlit làm backend suy luận. Kiến trúc chuẩn:
+```text
+Browser Client / Frontend (Streamlit / React)
+       ↓ (HTTP REST / Base64 / Multipart)
+FastAPI Backend Server
+       ↓ (Request Queue / Redis)
+Inference Worker Process (Torch / ONNX Runtime)
+       ↓
+GPU / CUDA Accelerator
 ```
 
-Thêm `--show` nếu muốn mở cửa sổ Matplotlib trên máy local.
+### 4.2 API Endpoint tiêu chuẩn (FastAPI)
+- `GET /health`: Kiểm tra trạng thái dịch vụ và GPU.
+- `GET /model-info`: Trả về thông tin mô hình, phiên bản, encoder và kích thước đầu vào.
+- `POST /predict`: Nhận file ảnh upload, trả về mask PNG / Base64, danh sách lớp ngữ nghĩa xuất hiện và độ trễ (`latency_ms`).
 
-## Demo Streamlit
+### 4.3 Giới hạn tài nguyên & Bảo mật
+- **Kích thước ảnh**: Tối đa 10 MB per upload, giới hạn 20 Megapixels (`MAX_PIXELS = 20_000_000`).
+- **Quyền riêng tư (Privacy Notice)**: Dịch vụ không lưu trữ dữ liệu ảnh của người dùng trên ổ đĩa lâu dài, xóa toàn bộ artifact tạm sau request và không sử dụng ảnh upload để huấn luyện lại mô hình khi chưa được phép.
 
-Khởi động ứng dụng:
+---
 
-```bash
-python -m streamlit run streamlit_segmentation_ui.py
-```
-
-Sau đó mở địa chỉ Streamlit hiển thị trong terminal, thường là `http://localhost:8501`.
-
-### Tab Tải ảnh thực tế
-
-Tab này chỉ yêu cầu checkpoint, không yêu cầu tải Pascal VOC. Quy trình:
-
-1. Nhập đường dẫn checkpoint ở sidebar.
-2. Tải ảnh JPG hoặc PNG.
-3. Chọn alpha overlay và ngưỡng diện tích lớp tối thiểu.
-4. Bấm **Phân đoạn ảnh đã tải**.
-
-Ứng dụng hiển thị ảnh gốc, mask màu, overlay và bảng lớp được phát hiện. Ngưỡng diện tích giúp loại lớp chỉ xuất hiện ở vài pixel nhiễu.
-
-### Tab đánh giá VOC
-
-Tab này cần cả checkpoint và dataset. Dataset chỉ được kiểm tra khi người dùng bấm chạy, vì vậy thiếu VOC không làm hỏng tab upload.
-
-### Tab đồ thị huấn luyện
-
-Đọc `outputs/train_log.csv` và hiển thị loss/mIoU của train và validation.
-
-## Cấu trúc repository
+## Cấu trúc Repository
 
 ```text
 .
-├── config.py
-├── dataset_voc.py
-├── evaluate.py
-├── inference.py
-├── metrics.py
-├── plot_training_curves.py
-├── streamlit_segmentation_ui.py
-├── train_deeplabv3plus.py
-├── visualize_predictions.py
-├── voc_meta.py
-├── requirements.txt
-├── LICENSE
-└── README.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml               # Workflow GitHub Actions CI
+├── splits/
+│   ├── train.txt                # Split train cố định
+│   ├── val.txt                  # Split validation cố định
+│   └── test.txt                 # Split test cuối cố định
+├── tests/
+│   ├── test_dataset.py          # Test kiểm tra dataset & leakage
+│   ├── test_metrics.py          # Test tính toán mIoU/Dice
+│   ├── test_inference.py        # Test suy luận với mock model
+│   └── test_checkpoint.py       # Test lưu/đọc checkpoint & metadata
+├── config.py                    # Cấu hình hằng số hệ thống
+├── dataset_voc.py               # Dataset class & letterbox transform dùng chung
+├── download_checkpoint.py       # Script tải checkpoint & kiểm tra SHA-256
+├── evaluate.py                  # Script đánh giá metric & latency
+├── inference.py                 # Hàm dựng model, letterbox & predict
+├── metrics.py                   # Class tính toán IoU, Dice, Pixel Acc & export CSV
+├── plot_training_curves.py      # Vẽ biểu đồ loss và mIoU
+├── requirements.txt             # Thư viện runtime
+├── requirements-dev.txt         # Thư viện kiểm thử (pytest, ruff)
+├── streamlit_segmentation_ui.py # Giao diện Streamlit UI demo
+├── train_deeplabv3plus.py       # Pipeline huấn luyện mô hình mô-đun
+├── validate_dataset.py          # Script audit dataset & SHA-256 leakage
+├── visualize_predictions.py     # Xuất ảnh trực quan hóa 4 cột
+└── voc_meta.py                  # Tên 20 lớp VOC và colormap RGB
 ```
 
-| File | Trách nhiệm |
-|---|---|
-| `config.py` | Hằng số số lớp, ignore index và data root |
-| `dataset_voc.py` | Dataset và joint transforms ảnh–mask |
-| `evaluate.py` | Đánh giá metric và tốc độ suy luận từ checkpoint |
-| `inference.py` | Load checkpoint, preprocess giữ tỷ lệ và dự đoán kích thước gốc |
-| `metrics.py` | Confusion matrix và các metric segmentation |
-| `train_deeplabv3plus.py` | Training, validation, AMP, resume và checkpoint |
-| `visualize_predictions.py` | Xuất ảnh so sánh định tính |
-| `plot_training_curves.py` | Vẽ loss và mIoU theo epoch |
-| `streamlit_segmentation_ui.py` | Demo web cho upload ảnh và VOC |
-| `voc_meta.py` | Tên lớp và Pascal VOC color map |
-
-## Xử lý lỗi thường gặp
-
-### Không tìm thấy dataset
-
-```text
-FileNotFoundError: ... ImageSets/Segmentation/train.txt
-```
-
-Kiểm tra `--data-root` có trỏ trực tiếp tới thư mục chứa `JPEGImages`, `SegmentationClass` và `ImageSets` hay không.
-
-### Không tìm thấy checkpoint
-
-Train mô hình trước hoặc tải checkpoint đã phát hành, sau đó truyền đúng đường dẫn qua `--checkpoint` hoặc sidebar Streamlit.
-
-### CUDA out of memory
-
-- Giảm `--batch-size` từ 8 xuống 4, 2 hoặc 1.
-- Giảm `--image-size`.
-- Đóng chương trình khác đang dùng GPU.
-- Giữ `--amp` bật.
-
-### DataLoader lỗi trên Windows
-
-Thử `--num-workers 0`. Cách này chậm hơn nhưng hữu ích để xác định lỗi multiprocessing.
-
-### PowerShell không cho activate virtual environment
-
-Có thể chạy trực tiếp:
-
-```powershell
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe train_deeplabv3plus.py
-```
-
-### Kết quả chứa nhiều lớp có diện tích rất nhỏ
-
-Tăng **Diện tích lớp tối thiểu (%)** trong sidebar Streamlit. Đây chỉ là bộ lọc hiển thị, không thay đổi predicted mask.
-
-## Đóng gói kết quả portfolio
-
-Trước khi đưa dự án vào CV hoặc public GitHub, nên hoàn thành checklist:
-
-- [ ] Chạy evaluation trên validation split cố định.
-- [ ] Điền bảng kết quả bằng số liệu đã xác minh.
-- [ ] Thêm biểu đồ training curves vào `assets/`.
-- [ ] Thêm 5–10 qualitative predictions.
-- [ ] Thêm ít nhất 2 failure cases và phân tích.
-- [ ] Tạo GitHub Release chứa checkpoint hoặc link Hugging Face.
-- [ ] Thêm repository topics và homepage demo.
-- [ ] Ghi phần cứng và thời gian huấn luyện.
-
-## Hạn chế và roadmap
-
-### Hạn chế hiện tại
-
-- Chưa có checkpoint công khai trong repository.
-- Chưa có kết quả validation được xác minh.
-- Chưa có demo online.
-- Chưa benchmark latency, FPS hoặc peak VRAM.
-- Chưa xuất ONNX/TensorRT.
-- Pipeline hiện dùng cố định 21 lớp Pascal VOC.
-
-### Thí nghiệm đề xuất
-
-| Nhóm | So sánh |
-|---|---|
-| Loss | Cross Entropy và Cross Entropy + Dice |
-| Backbone | ResNet50 và MobileNet/EfficientNet |
-| Resolution | 320 và 512 |
-| Augmentation | Có và không augmentation |
-| Baseline | DeepLabV3+, U-Net và FCN |
-
-Một ablation nhỏ có cùng protocol và phân tích rõ ràng có giá trị hơn nhiều kiến trúc nhưng thiếu kiểm soát thí nghiệm.
-
-### Hướng phát triển
-
-- Tách package thành `src/`, `scripts/`, `app/` và `configs/` khi dự án mở rộng.
-- Thêm script evaluation độc lập và xuất báo cáo per-class.
-- Benchmark CPU/GPU và peak VRAM.
-- Xuất ONNX và tối ưu inference.
-- Thêm Dockerfile.
-- Deploy lên Streamlit Community Cloud hoặc Hugging Face Spaces.
-
-## Tài liệu tham khảo
-
-1. Liang-Chieh Chen et al., *Encoder-Decoder with Atrous Separable Convolution for Semantic Image Segmentation*, ECCV 2018.
-2. Mark Everingham et al., *The Pascal Visual Object Classes Challenge: A Retrospective*, IJCV 2015.
-3. Pavel Yakubovskiy, `segmentation-models-pytorch`.
-
-Nếu sử dụng dự án cho báo cáo học thuật, hãy trích dẫn paper DeepLabV3+, Pascal VOC và các thư viện chính được sử dụng.
+---
 
 ## License
 

@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import argparse
+import logging
 import random
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import segmentation_models_pytorch as smp
 import torch
 from segmentation_models_pytorch.losses import DiceLoss
 from torch import nn
@@ -26,24 +32,122 @@ from dataset_voc import (
 from inference import build_model
 from metrics import SegmentationMetrics, save_metrics
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-def set_seed(seed: int) -> None:
+
+def set_seed(seed: int, deterministic: bool = False) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        logger.info("Đã bật chế độ deterministic cho cuDNN")
+    else:
+        torch.backends.cudnn.benchmark = True
+
+
+class CombinedLoss(nn.Module):
+    def __init__(self, ignore_index: int):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        self.dice = DiceLoss(mode="multiclass", ignore_index=ignore_index)
+
+    def forward(self, logits: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+        return self.ce(logits, masks) + 0.5 * self.dice(logits, masks)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Huấn luyện mô hình phân đoạn ảnh trên Pascal VOC")
+    parser.add_argument("--data-root", type=str, default=str(VOC_ROOT))
+    parser.add_argument("--architecture", type=str, default="deeplabv3plus", choices=["deeplabv3plus", "unet", "fcn"])
+    parser.add_argument("--encoder", type=str, default="resnet50")
+    parser.add_argument("--encoder-weights", type=str, default="imagenet")
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--image-size", type=int, default=IMAGE_SIZE)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--deterministic", action="store_true", help="Bật chế độ deterministic")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--resume", type=Path, default=None, help="Tiếp tục từ checkpoint")
+    parser.add_argument("--patience", type=int, default=0, help="Dừng sớm (early stopping); 0 là tắt")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+
+    args = parser.parse_args()
+    if args.epochs <= 0:
+        parser.error("--epochs phải lớn hơn 0")
+    if args.batch_size <= 0:
+        parser.error("--batch-size phải lớn hơn 0")
+    if args.image_size <= 0:
+        parser.error("--image-size phải lớn hơn 0")
+    if args.lr <= 0:
+        parser.error("--lr phải lớn hơn 0")
+    if args.patience < 0:
+        parser.error("--patience không được âm")
+    return args
+
+
+def create_dataloaders(args: argparse.Namespace, device: torch.device):
+    data_root = Path(args.data_root)
+    validate_voc_dataset(data_root)
+
+    train_dataset = VOCSegmentationDataset(
+        data_root,
+        split="train",
+        joint_transform=get_train_transforms(args.image_size, args.image_size),
+    )
+    val_dataset = VOCSegmentationDataset(
+        data_root,
+        split="val",
+        joint_transform=get_val_transforms(args.image_size, args.image_size),
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+        drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    return train_loader, val_loader
+
+
+def create_training_components(args: argparse.Namespace, device: torch.device, resume_checkpoint: dict[str, Any] | None):
+    initial_weights = None if resume_checkpoint is not None else args.encoder_weights
+    model = build_model(args.encoder, initial_weights, NUM_CLASSES, args.architecture).to(device)
+    criterion = CombinedLoss(ignore_index=IGNORE_INDEX)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    active_scaler = scaler if scaler.is_enabled() else None
+    return model, criterion, optimizer, scheduler, active_scaler
 
 
 def run_epoch(
-    model,
-    loader,
-    criterion,
-    optimizer,
-    device,
-    num_classes,
-    ignore_index,
-    train_mode=True,
-    scaler=None,
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    num_classes: int,
+    ignore_index: int,
+    train_mode: bool = True,
+    scaler: torch.amp.GradScaler | None = None,
 ):
     if train_mode:
         model.train()
@@ -76,125 +180,97 @@ def run_epoch(
         epoch_loss += loss.item()
 
     avg_loss = epoch_loss / max(len(loader), 1)
-    return avg_loss, metrics.compute()
+    return avg_loss, metrics.compute(ignore_index=ignore_index)
 
 
-class CombinedLoss(nn.Module):
-    def __init__(self, ignore_index):
-        super().__init__()
-        self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
-        # Hàm mất mát Dice bỏ qua vùng nhãn 255; lớp nền của Pascal VOC có mã 0.
-        self.dice = DiceLoss(mode="multiclass", ignore_index=ignore_index)
+def save_checkpoint(
+    ckpt_path: Path,
+    epoch: int,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    active_scaler: Any,
+    best_miou: float,
+    args: argparse.Namespace,
+    val_metrics: dict[str, Any],
+) -> None:
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        git_sha = None
 
-    def forward(self, logits, masks):
-        return self.ce(logits, masks) + 0.5 * self.dice(logits, masks)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "scaler_state_dict": active_scaler.state_dict() if active_scaler else None,
+            "architecture": args.architecture,
+            "encoder": args.encoder,
+            "encoder_weights": args.encoder_weights,
+            "image_size": args.image_size,
+            "best_val_miou": best_miou,
+            "loss": "cross_entropy + 0.5 * dice",
+            "num_classes": NUM_CLASSES,
+            "ignore_index": IGNORE_INDEX,
+            "class_mapping": "Pascal VOC 2012",
+            "python_version": sys.version,
+            "pytorch_version": torch.__version__,
+            "smp_version": smp.__version__,
+            "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+            "seed": args.seed,
+            "deterministic": args.deterministic,
+            "train_args": {
+                key: str(value) if isinstance(value, Path) else value
+                for key, value in vars(args).items()
+            },
+            "git_commit": git_sha,
+        },
+        ckpt_path,
+    )
+    logger.info("Đã lưu checkpoint tốt nhất tại: %s", ckpt_path)
+    save_metrics(val_metrics, ckpt_path.parent / "best_metrics.json", ckpt_path.parent / "per_class_metrics.csv")
 
 
-def main():
-    configure_console()
-    parser = argparse.ArgumentParser(description="Huấn luyện DeepLabV3+ trên Pascal VOC")
-    parser.add_argument("--data-root", type=str, default=str(VOC_ROOT))
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--image-size", type=int, default=IMAGE_SIZE)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--encoder", type=str, default="resnet50")
-    parser.add_argument("--encoder-weights", type=str, default="imagenet")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
-    parser.add_argument("--resume", type=Path, default=None, help="Tiếp tục từ checkpoint")
-    parser.add_argument("--patience", type=int, default=0, help="Dừng sớm; 0 là tắt")
-    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
-    args = parser.parse_args()
-
-    set_seed(args.seed)
+def train(args: argparse.Namespace) -> None:
+    set_seed(args.seed, args.deterministic)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if args.epochs <= 0:
-        parser.error("--epochs phải lớn hơn 0")
-    if args.batch_size <= 0:
-        parser.error("--batch-size phải lớn hơn 0")
-    if args.image_size <= 0:
-        parser.error("--image-size phải lớn hơn 0")
-    if args.lr <= 0:
-        parser.error("--lr phải lớn hơn 0")
-    if args.patience < 0:
-        parser.error("--patience không được âm")
+    logger.info("Huấn luyện kiến trúc: %s (%s) trên thiết bị: %s", args.architecture, args.encoder, device)
 
-    print(f"Thiết bị: {device}")
-
-    data_root = Path(args.data_root)
-    validate_voc_dataset(data_root)
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = output_dir / "deeplabv3plus_voc_best.pth"
+    ckpt_path = output_dir / f"{args.architecture}_{args.encoder}_voc_best.pth"
+
     resume_checkpoint = None
     if args.resume:
         if not args.resume.is_file():
-            parser.error(f"Không tìm thấy checkpoint: {args.resume}")
-        resume_checkpoint = torch.load(args.resume, map_location=device)
-        if not isinstance(resume_checkpoint, dict) or "model_state_dict" not in resume_checkpoint:
-            parser.error("Checkpoint dùng để tiếp tục huấn luyện không đúng định dạng")
-        checkpoint_classes = int(resume_checkpoint.get("num_classes", NUM_CLASSES))
-        if checkpoint_classes != NUM_CLASSES:
-            parser.error(
-                f"Checkpoint có {checkpoint_classes} lớp, nhưng cấu hình hiện tại có {NUM_CLASSES} lớp"
-            )
-        args.encoder = resume_checkpoint.get("encoder", args.encoder)
-        args.encoder_weights = resume_checkpoint.get("encoder_weights", args.encoder_weights)
+            raise FileNotFoundError(f"Không tìm thấy checkpoint: {args.resume}")
+        resume_checkpoint = torch.load(args.resume, map_location=device, weights_only=True)
 
-    train_dataset = VOCSegmentationDataset(
-        data_root,
-        split="train",
-        joint_transform=get_train_transforms(args.image_size, args.image_size),
-    )
-    val_dataset = VOCSegmentationDataset(
-        data_root,
-        split="val",
-        joint_transform=get_val_transforms(args.image_size, args.image_size),
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-    )
-
-    initial_weights = None if resume_checkpoint is not None else args.encoder_weights
-    model = build_model(args.encoder, initial_weights, NUM_CLASSES).to(device)
-    criterion = CombinedLoss(ignore_index=IGNORE_INDEX)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
-    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
-    active_scaler = scaler if scaler.is_enabled() else None
+    train_loader, val_loader = create_dataloaders(args, device)
+    model, criterion, optimizer, scheduler, active_scaler = create_training_components(args, device, resume_checkpoint)
 
     best_miou = -1.0
     start_epoch = 1
     stale_epochs = 0
     history_lines = ["epoch,train_loss,train_miou,val_loss,val_miou"]
+
     if resume_checkpoint is not None:
-        checkpoint = resume_checkpoint
-        model.load_state_dict(checkpoint["model_state_dict"])
-        if "optimizer_state_dict" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-            # Cho phép kéo dài tổng số epoch khi tiếp tục một lần huấn luyện cũ.
+        model.load_state_dict(resume_checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in resume_checkpoint:
+            optimizer.load_state_dict(resume_checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in resume_checkpoint:
+            scheduler.load_state_dict(resume_checkpoint["scheduler_state_dict"])
             scheduler.T_max = args.epochs
-        if active_scaler is not None and checkpoint.get("scaler_state_dict"):
-            active_scaler.load_state_dict(checkpoint["scaler_state_dict"])
-        start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        best_miou = float(checkpoint.get("best_val_miou", -1.0))
+        if active_scaler is not None and resume_checkpoint.get("scaler_state_dict"):
+            active_scaler.load_state_dict(resume_checkpoint["scaler_state_dict"])
+        start_epoch = int(resume_checkpoint.get("epoch", 0)) + 1
+        best_miou = float(resume_checkpoint.get("best_val_miou", -1.0))
         log_path = output_dir / "train_log.csv"
         if log_path.exists():
             history_lines = log_path.read_text(encoding="utf-8").splitlines()
@@ -208,18 +284,23 @@ def main():
             device,
             NUM_CLASSES,
             IGNORE_INDEX,
-            True,
-            active_scaler,
+            train_mode=True,
+            scaler=active_scaler,
         )
         val_loss, val_metrics = run_epoch(
             model, val_loader, criterion, optimizer, device, NUM_CLASSES, IGNORE_INDEX, train_mode=False
         )
         train_miou, val_miou = train_metrics["mean_iou"], val_metrics["mean_iou"]
 
-        print(
-            f"Epoch {epoch:02d}/{args.epochs} | LR={scheduler.get_last_lr()[0]:.2e} | "
-            f"train_loss={train_loss:.4f}, train_mIoU={train_miou:.4f} | "
-            f"val_loss={val_loss:.4f}, val_mIoU={val_miou:.4f}"
+        logger.info(
+            "Epoch %02d/%d | LR=%.2e | train_loss=%.4f, train_mIoU=%.4f | val_loss=%.4f, val_mIoU=%.4f",
+            epoch,
+            args.epochs,
+            scheduler.get_last_lr()[0],
+            train_loss,
+            train_miou,
+            val_loss,
+            val_miou,
         )
         history_lines.append(f"{epoch},{train_loss:.6f},{train_miou:.6f},{val_loss:.6f},{val_miou:.6f}")
         scheduler.step()
@@ -227,48 +308,22 @@ def main():
         if val_miou > best_miou:
             best_miou = val_miou
             stale_epochs = 0
-            try:
-                git_sha = subprocess.check_output(
-                    ["git", "rev-parse", "HEAD"],
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                ).strip()
-            except (OSError, subprocess.SubprocessError):
-                git_sha = None
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "scaler_state_dict": active_scaler.state_dict() if active_scaler else None,
-                    "encoder": args.encoder,
-                    "encoder_weights": args.encoder_weights,
-                    "image_size": args.image_size,
-                    "best_val_miou": best_miou,
-                    "loss": "cross_entropy + 0.5 * dice",
-                    "num_classes": NUM_CLASSES,
-                    "ignore_index": IGNORE_INDEX,
-                    "class_mapping": "Pascal VOC 2012",
-                    "train_args": {
-                        key: str(value) if isinstance(value, Path) else value
-                        for key, value in vars(args).items()
-                    },
-                    "git_commit": git_sha,
-                },
-                ckpt_path,
-            )
-            print(f"Đã lưu checkpoint tốt nhất: {ckpt_path}")
-            save_metrics(val_metrics, output_dir / "best_metrics.json")
+            save_checkpoint(ckpt_path, epoch, model, optimizer, scheduler, active_scaler, best_miou, args, val_metrics)
         else:
             stale_epochs += 1
 
-        (output_dir / "train_log.csv").write_text("\n".join(history_lines))
+        (output_dir / "train_log.csv").write_text("\n".join(history_lines), encoding="utf-8")
         if args.patience > 0 and stale_epochs >= args.patience:
-            print(f"Dừng sớm sau {stale_epochs} epoch không cải thiện.")
+            logger.info("Dừng sớm (early stopping) sau %d epoch không cải thiện.", stale_epochs)
             break
 
-    print(f"Huấn luyện hoàn tất. Validation mIoU tốt nhất: {best_miou:.4f}")
+    logger.info("Huấn luyện hoàn tất. Validation mIoU tốt nhất: %.4f", best_miou)
+
+
+def main() -> None:
+    configure_console()
+    args = parse_args()
+    train(args)
 
 
 if __name__ == "__main__":

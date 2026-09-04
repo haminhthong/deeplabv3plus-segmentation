@@ -1,8 +1,8 @@
+from __future__ import annotations
 
 import random
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 import torch
@@ -11,12 +11,14 @@ from PIL import Image
 from config import CHECKPOINT_PATH, IGNORE_INDEX, NUM_CLASSES, VOC_ROOT
 from dataset_voc import read_split_ids
 from inference import load_checkpoint_model, overlay_mask, predict_original_size
-from plot_training_curves import read_training_log
-from voc_meta import VOC_CLASS_NAMES, mask_to_color_rgb
+from plot_training_curves import create_training_figure
+from voc_meta import VOC_CLASSES, mask_to_color_rgb
+
+MAX_PIXELS = 20_000_000  # Giới hạn 20 Megapixels tránh cạn kiệt bộ nhớ
 
 
 def summarize_present_classes(mask: np.ndarray, min_area_percent: float = 0.1):
-    """Thống kê các lớp đối tượng có diện tích đạt ngưỡng yêu cầu."""
+    """Thống kê các lớp ngữ nghĩa xuất hiện có diện tích đạt ngưỡng yêu cầu."""
     flat = mask.reshape(-1)
     total = int(flat.size)
     counts = np.bincount(flat, minlength=NUM_CLASSES).astype(np.int64)
@@ -30,7 +32,7 @@ def summarize_present_classes(mask: np.ndarray, min_area_percent: float = 0.1):
         rows.append(
             {
                 "class_id": class_id,
-                "class_name": VOC_CLASS_NAMES.get(class_id, str(class_id)),
+                "class_name": VOC_CLASSES[class_id],
                 "pixels": pixels,
                 "percent": percent,
             }
@@ -40,17 +42,25 @@ def summarize_present_classes(mask: np.ndarray, min_area_percent: float = 0.1):
 
 
 @st.cache_resource(show_spinner=False)
-def load_model(checkpoint_path_str: str, device_str: str):
+def load_model_safe(checkpoint_path_str: str, device_str: str):
     device = torch.device(device_str)
-    model, ckpt = load_checkpoint_model(checkpoint_path_str, device)
-    encoder = ckpt.get("encoder", "resnet50")
-    image_size = int(ckpt.get("image_size", 320))
-    return model, encoder, image_size
+    try:
+        model, ckpt = load_checkpoint_model(checkpoint_path_str, device)
+        encoder = ckpt.get("encoder", "resnet50")
+        architecture = ckpt.get("architecture", "deeplabv3plus")
+        image_size = int(ckpt.get("image_size", 320))
+        return model, encoder, architecture, image_size
+    except FileNotFoundError as e:
+        st.error(f"Không tìm thấy checkpoint: {e}")
+        st.stop()
+    except RuntimeError as e:
+        st.error(f"Checkpoint không tương thích hoặc hỏng: {e}")
+        st.stop()
 
 
 def main():
-    st.set_page_config(page_title="DeepLabV3+ Segmentation UI", layout="wide")
-    st.title("DeepLabV3+ - Demo Phân Đoạn Ảnh (Pascal VOC 2012)")
+    st.set_page_config(page_title="DeepLabV3+ Semantic Segmentation UI", layout="wide")
+    st.title("DeepLabV3+ - Demo Phân Đoạn Ngữ Nghĩa (Pascal VOC 2012)")
 
     default_data_root = str(VOC_ROOT)
     default_ckpt = str(CHECKPOINT_PATH)
@@ -59,7 +69,7 @@ def main():
         st.header("Cấu hình")
         data_root_str = st.text_input("Data root", value=default_data_root)
         ckpt_path_str = st.text_input("Checkpoint", value=default_ckpt)
-        split = st.selectbox("Split để dự đoán", ["val", "train"], index=0)
+        split = st.selectbox("Split để dự đoán", ["val", "test", "train"], index=0)
 
         num_samples = st.slider("Số ảnh hiển thị", min_value=1, max_value=12, value=6, step=1)
         random_seed = st.number_input("Seed chọn ảnh", min_value=0, max_value=10_000, value=42, step=1)
@@ -74,31 +84,45 @@ def main():
     ckpt_path = Path(ckpt_path_str)
 
     with tabs[0]:
-        st.subheader("Tải ảnh thực tế lên và liệt kê 20 đối tượng (VOC)")
+        st.subheader("Tải ảnh thực tế lên và phân đoạn các lớp ngữ nghĩa (VOC 20 lớp)")
 
-        uploaded = st.file_uploader("Chọn ảnh (jpg/png)", type=["jpg", "jpeg", "png"])
+        uploaded = st.file_uploader("Chọn ảnh (JPG/PNG)", type=["jpg", "jpeg", "png"])
         alpha = st.slider("Độ trong suốt overlay", min_value=0.0, max_value=1.0, value=0.5, step=0.05)
         run_btn = st.button("Phân đoạn ảnh đã tải", type="primary")
 
         if uploaded is None:
             st.info("Hãy tải 1 ảnh lên để bắt đầu.")
         elif run_btn:
-            if not ckpt_path.is_file():
-                st.error(f"Không tìm thấy checkpoint: {ckpt_path}")
+            model, encoder, architecture, ckpt_image_size = load_model_safe(str(ckpt_path), device_str)
+            try:
+                with Image.open(uploaded) as source:
+                    image = source.convert("RGB")
+            except (OSError, ValueError):
+                st.error("Ảnh tải lên không hợp lệ hoặc bị hỏng.")
                 st.stop()
-            model, encoder, ckpt_image_size = load_model(str(ckpt_path), device_str)
-            image = Image.open(uploaded).convert("RGB")
-            pred_mask = predict_original_size(model, image, ckpt_image_size, torch.device(device_str))
+
+            if image.width * image.height > MAX_PIXELS:
+                st.error(f"Ảnh quá lớn ({image.width}x{image.height}). Vui lòng tải ảnh dưới {MAX_PIXELS // 1_000_000} Megapixels.")
+                st.stop()
+
+            try:
+                pred_mask = predict_original_size(model, image, ckpt_image_size, torch.device(device_str))
+            except torch.cuda.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                st.error("GPU không đủ bộ nhớ. Hãy dùng ảnh nhỏ hơn.")
+                st.stop()
+
             image_rgb = np.asarray(image)
             pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
             pred_overlay = overlay_mask(image_rgb, pred_vis, alpha)
 
             c1, c2, c3 = st.columns(3)
             c1.image(image_rgb, caption="Ảnh gốc", use_container_width=True)
-            c2.image(pred_vis, caption="Mặt nạ dự đoán", use_container_width=True)
-            c3.image(pred_overlay, caption="Ảnh phủ màu", use_container_width=True)
+            c2.image(pred_vis, caption="Mặt nạ phân đoạn ngữ nghĩa", use_container_width=True)
+            c3.image(pred_overlay, caption="Ảnh phủ màu (Overlay)", use_container_width=True)
 
-            st.markdown("### Kết quả liệt kê đối tượng (20 lớp VOC)")
+            st.markdown("### Kết quả lớp ngữ nghĩa xuất hiện (20 lớp VOC)")
             rows = summarize_present_classes(pred_mask, float(min_area))
             if not rows:
                 st.warning("Không phát hiện lớp đối tượng nào (ngoài background).")
@@ -109,36 +133,35 @@ def main():
                     hide_index=True,
                     column_config={
                         "class_id": st.column_config.NumberColumn("Mã lớp", format="%d"),
-                        "class_name": st.column_config.TextColumn("Đối tượng"),
+                        "class_name": st.column_config.TextColumn("Lớp ngữ nghĩa"),
                         "pixels": st.column_config.NumberColumn("Số pixel", format="%d"),
-                        "percent": st.column_config.NumberColumn("Diện tích (%)", format="%.2f"),
+                        "percent": st.column_config.NumberColumn("Tỷ lệ diện tích (%)", format="%.2f"),
                     },
                 )
 
                 top_names = ", ".join([r["class_name"] for r in rows[:10]])
                 st.success(
-                    f"Hoàn tất. Encoder: {encoder}, kích thước đầu vào: {ckpt_image_size}. "
-                    f"Các lớp nổi bật: {top_names}"
+                    f"Hoàn tất. Kiến trúc: {architecture.upper()} ({encoder}), "
+                    f"Kích thước đầu vào: {ckpt_image_size}. "
+                    f"Các lớp chiếm diện tích lớn: {top_names}"
                 )
 
-            with st.expander("Danh sách 20 lớp (VOC)"):
-                st.write({k: VOC_CLASS_NAMES[k] for k in range(1, NUM_CLASSES)})
+            with st.expander("Danh sách 20 lớp ngữ nghĩa (VOC)"):
+                st.write({k: VOC_CLASSES[k] for k in range(1, NUM_CLASSES)})
 
     with tabs[1]:
-        st.subheader("Trực quan hóa Input / Ground Truth / Prediction")
+        st.subheader("Trực quan hóa Input / Nhãn thật (Ground Truth) / Dự đoán (Prediction)")
         load_btn = st.button("Chạy dự đoán", type="primary")
 
         if load_btn:
-            if not ckpt_path.is_file():
-                st.error(f"Không tìm thấy checkpoint: {ckpt_path}")
-                st.stop()
-            split_file = data_root / "ImageSets" / "Segmentation" / f"{split}.txt"
-            if not split_file.is_file():
-                st.error(f"Không tìm thấy Pascal VOC split: {split_file}")
-                st.stop()
-            model, encoder, ckpt_image_size = load_model(str(ckpt_path), device_str)
+            model, encoder, architecture, ckpt_image_size = load_model_safe(str(ckpt_path), device_str)
 
-            ids = read_split_ids(data_root, split)
+            try:
+                ids = read_split_ids(data_root, split)
+            except (FileNotFoundError, ValueError) as e:
+                st.error(f"Lỗi đọc tập dữ liệu {split}: {e}")
+                st.stop()
+
             random.seed(int(random_seed))
             chosen = random.sample(ids, k=min(int(num_samples), len(ids)))
 
@@ -147,26 +170,28 @@ def main():
                 img_path = data_root / "JPEGImages" / f"{image_id}.jpg"
                 mask_path = data_root / "SegmentationClass" / f"{image_id}.png"
 
-                image = Image.open(img_path).convert("RGB")
-                gt_mask_img = Image.open(mask_path)
+                try:
+                    with Image.open(img_path) as source:
+                        image = source.convert("RGB")
+                    with Image.open(mask_path) as source:
+                        gt_mask = np.asarray(source, dtype=np.int64)
+                    gt_vis = mask_to_color_rgb(gt_mask, ignore_index=IGNORE_INDEX)
 
-                gt_mask = np.array(gt_mask_img, dtype=np.int64)
-                gt_vis = mask_to_color_rgb(gt_mask, ignore_index=IGNORE_INDEX)
+                    pred_mask = predict_original_size(model, image, ckpt_image_size, torch.device(device_str))
+                    pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
+                    image_rgb = np.asarray(image)
 
-                pred_mask = predict_original_size(model, image, ckpt_image_size, torch.device(device_str))
-
-                pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
-                image_rgb = np.asarray(image)
-
-                c1, c2, c3 = st.columns(3)
-                c1.image(image_rgb, caption=f"Ảnh gốc ({image_id})", use_container_width=True)
-                c2.image(gt_vis, caption="Nhãn thật", use_container_width=True)
-                c3.image(pred_vis, caption="Dự đoán", use_container_width=True)
+                    c1, c2, c3 = st.columns(3)
+                    c1.image(image_rgb, caption=f"Ảnh gốc ({image_id})", use_container_width=True)
+                    c2.image(gt_vis, caption="Nhãn thật", use_container_width=True)
+                    c3.image(pred_vis, caption="Mặt nạ dự đoán", use_container_width=True)
+                except Exception as ex:
+                    st.warning(f"Không thể xử lý ảnh {image_id}: {ex}")
 
                 st.write("---")
                 progress.progress((i + 1) / len(chosen))
 
-            st.success(f"Hoàn tất. Encoder: {encoder} (checkpoint image_size={ckpt_image_size})")
+            st.success(f"Hoàn tất. Kiến trúc: {architecture.upper()} ({encoder})")
 
     with tabs[2]:
         st.subheader("Đồ thị Loss & mIoU theo epoch")
@@ -178,30 +203,11 @@ def main():
         if not log_path.exists():
             st.warning("Không tìm thấy `outputs/train_log.csv`. Hãy train xong rồi mở tab này.")
         else:
-            epochs, train_loss, train_miou, val_loss, val_miou = read_training_log(log_path)
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
-            axes[0].plot(epochs, train_loss, marker="o", label="Huấn luyện")
-            axes[0].plot(epochs, val_loss, marker="o", label="Xác thực")
-            axes[0].set_xlabel("Epoch")
-            axes[0].set_ylabel("Loss")
-            axes[0].set_title("Hàm mất mát")
-            axes[0].grid(True, alpha=0.3)
-            axes[0].legend()
-
-            axes[1].plot(epochs, train_miou, marker="o", label="Huấn luyện")
-            axes[1].plot(epochs, val_miou, marker="o", label="Xác thực")
-            axes[1].set_xlabel("Epoch")
-            axes[1].set_ylabel("mIoU")
-            axes[1].set_title("mIoU")
-            axes[1].grid(True, alpha=0.3)
-            axes[1].legend()
-
-            st.pyplot(fig)
-            plt.close(fig)
+            figure = create_training_figure(log_path)
+            st.pyplot(figure)
+            figure.clear()
             st.caption(f"Nguồn: {log_path}")
 
 
 if __name__ == "__main__":
     main()
-

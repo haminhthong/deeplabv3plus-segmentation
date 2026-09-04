@@ -26,8 +26,6 @@ VOC_CLASSES = [
     "Tvmonitor (Tivi/Màn hình)",
 ]
 
-VOC_CLASS_NAMES = {idx: name for idx, name in enumerate(VOC_CLASSES)}
-
 VOC_COLORMAP = np.array(
     [
         [0, 0, 0],

@@ -10,15 +10,44 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from config import IGNORE_INDEX, IMAGE_MEAN, IMAGE_STD
+from config import IGNORE_INDEX, IMAGE_MEAN, IMAGE_STD, VOC_ROOT
+
+
+def calculate_letterbox_geometry(
+    width: int,
+    height: int,
+    target_width: int,
+    target_height: int,
+) -> tuple[float, int, int, int, int, int, int]:
+    """Tính toán thông số hình học resize và đệm (letterbox) dùng chung giữa training và inference."""
+    if width <= 0 or height <= 0 or target_width <= 0 or target_height <= 0:
+        raise ValueError("Chiều cao và chiều rộng phải lớn hơn 0")
+    scale = min(target_width / width, target_height / height)
+    new_w = max(1, round(width * scale))
+    new_h = max(1, round(height * scale))
+    pad_left = (target_width - new_w) // 2
+    pad_top = (target_height - new_h) // 2
+    pad_right = target_width - new_w - pad_left
+    pad_bottom = target_height - new_h - pad_top
+    return scale, new_w, new_h, pad_left, pad_top, pad_right, pad_bottom
 
 
 def read_split_ids(root: Path | str, split: str) -> list[str]:
-    """Đọc danh sách mã ảnh và kiểm tra dữ liệu cơ bản."""
+    """Đọc danh sách mã ảnh và kiểm tra dữ liệu cơ bản (ưu tiên thư mục splits/)."""
     root = Path(root)
-    split_file = root / "ImageSets" / "Segmentation" / f"{split}.txt"
-    if not split_file.is_file():
-        raise FileNotFoundError(f"Không tìm thấy tệp chia dữ liệu: {split_file}")
+    root_splits_file = root / "splits" / f"{split}.txt"
+    voc_split_file = root / "ImageSets" / "Segmentation" / f"{split}.txt"
+    global_splits_file = Path("splits") / f"{split}.txt"
+
+    if root_splits_file.is_file():
+        split_file = root_splits_file
+    elif voc_split_file.is_file():
+        split_file = voc_split_file
+    elif (root == Path(".") or root == VOC_ROOT) and global_splits_file.is_file():
+        split_file = global_splits_file
+    else:
+        raise FileNotFoundError(f"Không tìm thấy tệp chia dữ liệu tại {root_splits_file} hoặc {voc_split_file}")
+
     ids = [line.strip() for line in split_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not ids:
         raise ValueError(f"Tệp chia dữ liệu không chứa mã ảnh: {split_file}")
@@ -28,16 +57,33 @@ def read_split_ids(root: Path | str, split: str) -> list[str]:
 
 
 def validate_voc_dataset(root: Path | str) -> None:
-    """Kiểm tra split, file ảnh/mặt nạ và rò rỉ giữa train với val."""
+    """Kiểm tra split, file ảnh/mặt nạ và rò rỉ giữa train/val/test."""
     root = Path(root)
-    train_ids = read_split_ids(root, "train")
-    val_ids = read_split_ids(root, "val")
-    overlap = set(train_ids).intersection(val_ids)
-    if overlap:
-        raise ValueError(f"Train và val bị trùng {len(overlap)} ảnh")
+    splits_to_check = []
+    for s in ["train", "val", "test"]:
+        try:
+            ids = read_split_ids(root, s)
+            splits_to_check.append((s, ids))
+        except FileNotFoundError:
+            pass
+
+    if not splits_to_check:
+        raise FileNotFoundError("Không tìm thấy tệp chia dữ liệu nào")
+
+    for i in range(len(splits_to_check)):
+        for j in range(i + 1, len(splits_to_check)):
+            s1_name, s1_ids = splits_to_check[i]
+            s2_name, s2_ids = splits_to_check[j]
+            overlap = set(s1_ids).intersection(s2_ids)
+            if overlap:
+                raise ValueError(f"Split {s1_name} và {s2_name} bị trùng {len(overlap)} ảnh")
 
     missing = []
-    for image_id in train_ids + val_ids:
+    all_ids = set()
+    for _, ids in splits_to_check:
+        all_ids.update(ids)
+
+    for image_id in all_ids:
         for path in (
             root / "JPEGImages" / f"{image_id}.jpg",
             root / "SegmentationClass" / f"{image_id}.png",
@@ -71,7 +117,6 @@ class TrainJointTransform:
         self.normalize = transforms.Normalize(IMAGE_MEAN, IMAGE_STD)
 
     def __call__(self, image: Image.Image, mask: Image.Image):
-        # Thay đổi tỷ lệ ngẫu nhiên rồi cắt hoặc đệm để không làm méo đối tượng.
         scale = random.uniform(0.75, 1.5)
         scaled_h = max(1, round(image.height * scale))
         scaled_w = max(1, round(image.width * scale))
@@ -86,12 +131,10 @@ class TrainJointTransform:
         image = TF.crop(image, top, left, self.h, self.w)
         mask = TF.crop(mask, top, left, self.h, self.w)
 
-        # Lật ngang ảnh và mặt nạ cùng lúc.
         if random.random() > 0.5:
             image = TF.hflip(image)
             mask = TF.hflip(mask)
 
-        # Xoay, tịnh tiến và thu phóng nhẹ để tăng độ đa dạng của dữ liệu.
         if random.random() > 0.5:
             angle = random.uniform(-10.0, 10.0)
             translate = [
@@ -107,7 +150,6 @@ class TrainJointTransform:
                 shear=0,
                 interpolation=transforms.InterpolationMode.BILINEAR,
             )
-            # Nhãn 255 là vùng không được tính vào hàm mất mát và chỉ số đánh giá.
             mask = TF.affine(
                 mask,
                 angle=angle,
@@ -118,7 +160,6 @@ class TrainJointTransform:
                 fill=IGNORE_INDEX,
             )
 
-        # Chỉ thay đổi màu ảnh vì mặt nạ chứa mã lớp.
         if random.random() > 0.5:
             image = self.color_jitter(image)
         image_t = self.normalize(TF.to_tensor(image))
@@ -135,19 +176,15 @@ def get_train_transforms(h: int, w: int):
 
 
 def resize_and_pad(image: Image.Image, mask: Image.Image, h: int, w: int):
-    """Đổi kích thước theo đúng tỷ lệ rồi đệm tới kích thước yêu cầu."""
-    if h <= 0 or w <= 0:
-        raise ValueError("Chiều cao và chiều rộng phải lớn hơn 0")
+    """Đổi kích thước theo đúng tỷ lệ letterbox rồi đệm tới kích thước yêu cầu."""
     if image.size != mask.size:
         raise ValueError(f"Ảnh và mặt nạ phải cùng kích thước: {image.size} != {mask.size}")
-    scale = min(w / image.width, h / image.height)
-    new_w = max(1, round(image.width * scale))
-    new_h = max(1, round(image.height * scale))
+    _, new_w, new_h, pad_left, pad_top, pad_right, pad_bottom = calculate_letterbox_geometry(
+        image.width, image.height, w, h
+    )
     image = TF.resize(image, (new_h, new_w), interpolation=transforms.InterpolationMode.BILINEAR)
     mask = TF.resize(mask, (new_h, new_w), interpolation=transforms.InterpolationMode.NEAREST)
-    pad_left = (w - new_w) // 2
-    pad_top = (h - new_h) // 2
-    padding = [pad_left, pad_top, w - new_w - pad_left, h - new_h - pad_top]
+    padding = [pad_left, pad_top, pad_right, pad_bottom]
     return TF.pad(image, padding, fill=0), TF.pad(mask, padding, fill=IGNORE_INDEX)
 
 
@@ -166,8 +203,10 @@ class VOCSegmentationDataset(Dataset):
 
     def __getitem__(self, idx: int):
         sid = self.ids[idx]
-        image = Image.open(self.jpeg_dir / f"{sid}.jpg").convert("RGB")
-        mask = Image.open(self.mask_dir / f"{sid}.png")
+        with Image.open(self.jpeg_dir / f"{sid}.jpg") as source:
+            image = source.convert("RGB")
+        with Image.open(self.mask_dir / f"{sid}.png") as source:
+            mask = source.copy()
 
         if self.joint_transform is not None:
             image_t, mask_t = self.joint_transform(image, mask)

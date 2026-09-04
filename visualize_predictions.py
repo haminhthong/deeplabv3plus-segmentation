@@ -24,7 +24,7 @@ def main():
         type=Path,
         default=CHECKPOINT_PATH,
     )
-    parser.add_argument("--split", default="val", choices=("train", "val"))
+    parser.add_argument("--split", default="val", choices=("train", "val", "test"))
     parser.add_argument(
         "--indices",
         type=int,
@@ -60,8 +60,10 @@ def main():
             print(f"Bỏ qua chỉ số ngoài phạm vi: {idx}")
             continue
         sid = ds.ids[idx]
-        raw_img = Image.open(ds.jpeg_dir / f"{sid}.jpg").convert("RGB")
-        gt = np.array(Image.open(ds.mask_dir / f"{sid}.png"), dtype=np.int64)
+        with Image.open(ds.jpeg_dir / f"{sid}.jpg") as source:
+            raw_img = source.convert("RGB")
+        with Image.open(ds.mask_dir / f"{sid}.png") as source:
+            gt = np.asarray(source, dtype=np.int64)
         pred = predict_original_size(model, raw_img, image_size, device)
         overlay = overlay_mask(
             np.asarray(raw_img),
