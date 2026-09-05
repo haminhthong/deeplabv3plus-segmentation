@@ -6,7 +6,13 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from inference import build_model, overlay_mask, predict_original_size, prepare_image
+from inference import (
+    build_model,
+    overlay_mask,
+    predict_original_size,
+    predict_with_uncertainty,
+    prepare_image,
+)
 
 
 class DummySegmentationModel(nn.Module):
@@ -39,6 +45,29 @@ def test_predict_original_size_returns_correct_shape(width: int, height: int):
     assert pred_mask.dtype == np.int64
 
 
+def test_predict_with_uncertainty_outputs():
+    model = DummySegmentationModel(num_classes=21)
+    image = Image.new("RGB", (200, 150), color="blue")
+    device = torch.device("cpu")
+
+    outputs = predict_with_uncertainty(model, image, image_size=320, device=device)
+
+    assert "hard_mask" in outputs
+    assert "max_prob_map" in outputs
+    assert "entropy_map" in outputs
+
+    hard_mask = outputs["hard_mask"]
+    max_prob = outputs["max_prob_map"]
+    entropy = outputs["entropy_map"]
+
+    assert hard_mask.shape == (150, 200)
+    assert max_prob.shape == (150, 200)
+    assert entropy.shape == (150, 200)
+
+    assert np.all(max_prob >= 0.0) and np.all(max_prob <= 1.0)
+    assert np.all(entropy >= 0.0) and np.all(entropy <= 1.0)
+
+
 def test_prepare_image_invalid_size():
     image = Image.new("RGB", (100, 100))
     with pytest.raises(ValueError, match="lớn hơn 0"):
@@ -58,11 +87,11 @@ def test_overlay_mask_shape_and_range():
 def test_build_model_baseline():
     deeplab = build_model("resnet50", None, 21, "deeplabv3plus")
     unet = build_model("resnet50", None, 21, "unet")
-    fcn = build_model("resnet50", None, 21, "fcn")
+    fpn = build_model("resnet50", None, 21, "fpn")
 
     assert deeplab is not None
     assert unet is not None
-    assert fcn is not None
+    assert fpn is not None
 
     with pytest.raises(ValueError, match="không được hỗ trợ"):
         build_model("resnet50", None, 21, "invalid_arch")

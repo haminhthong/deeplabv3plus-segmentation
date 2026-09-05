@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 
 from dataset_voc import (
+    TrainJointTransform,
     calculate_letterbox_geometry,
     read_split_ids,
     resize_and_pad,
@@ -53,6 +54,15 @@ def test_read_split_ids_duplicates(tmp_path: Path):
         read_split_ids(tmp_path, "train")
 
 
+def test_read_split_ids_with_split_type(tmp_path: Path):
+    smoke_dir = tmp_path / "splits" / "smoke"
+    smoke_dir.mkdir(parents=True)
+    (smoke_dir / "train.txt").write_text("img_smoke_01\nimg_smoke_02\n", encoding="utf-8")
+
+    ids = read_split_ids(tmp_path, "train", split_type="smoke")
+    assert ids == ["img_smoke_01", "img_smoke_02"]
+
+
 def test_validate_dataset_train_val_leakage(tmp_path: Path):
     split_dir = tmp_path / "ImageSets" / "Segmentation"
     split_dir.mkdir(parents=True)
@@ -77,3 +87,15 @@ def test_resize_and_pad_mismatched_size():
     mask = Image.new("L", (100, 200))
     with pytest.raises(ValueError, match="cùng kích thước"):
         resize_and_pad(img, mask, 320, 320)
+
+
+def test_train_joint_transform_unbiased_padding():
+    # Thử nghiệm transform khi ảnh nhỏ hơn target (cần padding)
+    img = Image.new("RGB", (150, 150), color="green")
+    mask = Image.new("L", (150, 150), color=1)
+
+    transform = TrainJointTransform(320, 320)
+    img_t, mask_t = transform(img, mask)
+
+    assert img_t.shape == (3, 320, 320)
+    assert mask_t.shape == (320, 320)

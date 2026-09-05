@@ -1,20 +1,25 @@
-"""Script tải checkpoint mô hình DeepLabV3+ từ GitHub Releases / Hugging Face và xác minh SHA-256."""
+"""Script tải checkpoint mô hình DeepLabV3+ từ GitHub Releases / Cloud Storage và xác minh SHA-256."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import logging
+import sys
+import urllib.error
 from pathlib import Path
 from urllib.request import urlretrieve
 
-from config import CHECKPOINT_PATH
+from config import CHECKPOINT_PATH, configure_console
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHECKPOINT_URL = "https://github.com/example/deeplabv3plus-segmentation/releases/download/v1.0.0/deeplabv3plus_voc_best.pth"
-EXPECTED_SHA256 = ""  # Nhập chuỗi SHA-256 khi phát hành release chính thức
+OFFICIAL_REPO = "haminhthong/deeplabv3plus-segmentation"
+DEFAULT_CHECKPOINT_URL = (
+    f"https://github.com/{OFFICIAL_REPO}/releases/download/v1.0.0/deeplabv3plus_voc_best.pth"
+)
+EXPECTED_SHA256 = ""  # Điền chuỗi SHA-256 khi release chính thức được publish
 
 
 def calculate_sha256(path: Path) -> str:
@@ -29,9 +34,23 @@ def download_checkpoint(url: str, output_path: Path, expected_sha256: str = "") 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Đang tải checkpoint từ: %s", url)
-    urlretrieve(url, output_path)
-    logger.info("Tải xuống thành công: %s", output_path)
+    logger.info("Đang kiểm tra và tải checkpoint từ: %s", url)
+    try:
+        urlretrieve(url, output_path)
+        logger.info("Tải xuống thành công: %s", output_path)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            logger.warning(
+                "Checkpoint v1.0.0 chưa được phát hành công khai trên GitHub Releases (HTTP 404)."
+            )
+            logger.info("Hướng dẫn:")
+            logger.info("1. Bạn có thể tự huấn luyện mô hình: python train_deeplabv3plus.py")
+            logger.info("2. Hoặc tải từ URL lưu trữ của bạn: python download_checkpoint.py --url <URL> --sha256 <HASH>")
+            sys.exit(0)
+        raise
+    except urllib.error.URLError as e:
+        logger.error("Không thể kết nối đến máy chủ: %s", e)
+        raise
 
     actual_sha256 = calculate_sha256(output_path)
     logger.info("SHA-256 hash của file: %s", actual_sha256)
@@ -44,6 +63,7 @@ def download_checkpoint(url: str, output_path: Path, expected_sha256: str = "") 
 
 
 def main() -> None:
+    configure_console()
     parser = argparse.ArgumentParser(description="Tải checkpoint mô hình đã huấn luyện")
     parser.add_argument("--url", type=str, default=DEFAULT_CHECKPOINT_URL, help="URL tải checkpoint")
     parser.add_argument("--output", type=Path, default=CHECKPOINT_PATH, help="Đường dẫn file lưu")

@@ -1,3 +1,12 @@
+"""Dataset và Data Augmentation cho Pascal VOC Semantic Segmentation.
+
+QUY ƯỚC TIỀN XỬ LÝ (TRANSFORM CONTRACT):
+- Training pipeline: Sử dụng joint augmentation ngẫu nhiên (scale 0.75-1.5, đệm ngẫu nhiên không thiên lệch góc,
+  crop về target (h, w), lật ngang, affine nhẹ, color jitter chỉ trên ảnh RGB).
+- Validation & Serving pipeline: Sử dụng deterministic letterbox (giữ nguyên tỷ lệ khung hình, đệm đều vào giữa
+  về target (h, w), không crop mất thông tin).
+"""
+
 from __future__ import annotations
 
 import random
@@ -32,21 +41,52 @@ def calculate_letterbox_geometry(
     return scale, new_w, new_h, pad_left, pad_top, pad_right, pad_bottom
 
 
-def read_split_ids(root: Path | str, split: str) -> list[str]:
-    """Đọc danh sách mã ảnh và kiểm tra dữ liệu cơ bản (ưu tiên thư mục splits/)."""
-    root = Path(root)
-    root_splits_file = root / "splits" / f"{split}.txt"
-    voc_split_file = root / "ImageSets" / "Segmentation" / f"{split}.txt"
-    global_splits_file = Path("splits") / f"{split}.txt"
+def read_split_ids(
+    root: Path | str,
+    split: str,
+    split_dir: Path | str | None = None,
+    split_type: str = "benchmark",
+) -> list[str]:
+    """Đọc danh sách mã ảnh và kiểm tra tính hợp lệ dữ liệu.
 
-    if root_splits_file.is_file():
-        split_file = root_splits_file
-    elif voc_split_file.is_file():
-        split_file = voc_split_file
-    elif (root == Path(".") or root == VOC_ROOT) and global_splits_file.is_file():
-        split_file = global_splits_file
-    else:
-        raise FileNotFoundError(f"Không tìm thấy tệp chia dữ liệu tại {root_splits_file} hoặc {voc_split_file}")
+    Ưu tiên tìm split file:
+    1. split_dir chỉ định tường minh.
+    2. root/splits/{split_type}/{split}.txt
+    3. root/ImageSets/Segmentation/{split}.txt (VOC gốc)
+    4. root/splits/{split}.txt
+    5. splits/{split_type}/{split}.txt (workspace splits)
+    6. splits/{split}.txt (legacy workspace splits)
+    """
+    root = Path(root)
+
+    split_file = None
+    if split_dir is not None:
+        cand = Path(split_dir) / f"{split}.txt"
+        if cand.is_file():
+            split_file = cand
+
+    if split_file is None:
+        cand_sub = root / "splits" / split_type / f"{split}.txt"
+        cand_voc = root / "ImageSets" / "Segmentation" / f"{split}.txt"
+        cand_flat = root / "splits" / f"{split}.txt"
+        cand_ws_sub = Path("splits") / split_type / f"{split}.txt"
+        cand_ws_flat = Path("splits") / f"{split}.txt"
+
+        if cand_sub.is_file():
+            split_file = cand_sub
+        elif cand_voc.is_file():
+            split_file = cand_voc
+        elif cand_flat.is_file():
+            split_file = cand_flat
+        elif (root == Path(".") or root == VOC_ROOT or root == Path("data")) and cand_ws_sub.is_file():
+            split_file = cand_ws_sub
+        elif (root == Path(".") or root == VOC_ROOT or root == Path("data")) and cand_ws_flat.is_file():
+            split_file = cand_ws_flat
+
+    if split_file is None or not split_file.is_file():
+        raise FileNotFoundError(
+            f"Không tìm thấy tệp chia dữ liệu cho split='{split}' (split_type='{split_type}') tại {root} hoặc splits/"
+        )
 
     ids = [line.strip() for line in split_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not ids:
@@ -56,13 +96,17 @@ def read_split_ids(root: Path | str, split: str) -> list[str]:
     return ids
 
 
-def validate_voc_dataset(root: Path | str) -> None:
+def validate_voc_dataset(
+    root: Path | str,
+    split_dir: Path | str | None = None,
+    split_type: str = "benchmark",
+) -> None:
     """Kiểm tra split, file ảnh/mặt nạ và rò rỉ giữa train/val/test."""
     root = Path(root)
     splits_to_check = []
     for s in ["train", "val", "test"]:
         try:
-            ids = read_split_ids(root, s)
+            ids = read_split_ids(root, s, split_dir=split_dir, split_type=split_type)
             splits_to_check.append((s, ids))
         except FileNotFoundError:
             pass
@@ -96,6 +140,8 @@ def validate_voc_dataset(root: Path | str) -> None:
 
 
 class JointTransform:
+    """Deterministic letterbox transform dùng cho validation và inference."""
+
     def __init__(self, h: int, w: int) -> None:
         self.h = h
         self.w = w
@@ -110,6 +156,16 @@ class JointTransform:
 
 
 class TrainJointTransform:
+    """Joint augmentations cho quá trình huấn luyện:
+    - Random scale [0.75, 1.5]
+    - Unbiased padding: phân bố lề ngẫu nhiên khi kích thước thu nhỏ, tránh thiên lệch góc trên-trái
+    - Random crop về target (h, w)
+    - Random horizontal flip (p=0.5)
+    - Random affine: xoay +/- 10 độ, tịnh tiến +/- 5%, scale +/- 10%
+    - Mild Color Jitter (chỉ áp dụng trên ảnh RGB)
+    - Mask luôn nội suy NEAREST và điền IGNORE_INDEX=255
+    """
+
     def __init__(self, h: int, w: int) -> None:
         self.h = h
         self.w = w
@@ -122,11 +178,18 @@ class TrainJointTransform:
         scaled_w = max(1, round(image.width * scale))
         image = TF.resize(image, (scaled_h, scaled_w), interpolation=transforms.InterpolationMode.BILINEAR)
         mask = TF.resize(mask, (scaled_h, scaled_w), interpolation=transforms.InterpolationMode.NEAREST)
-        pad_right = max(0, self.w - scaled_w)
-        pad_bottom = max(0, self.h - scaled_h)
-        if pad_right or pad_bottom:
-            image = TF.pad(image, [0, 0, pad_right, pad_bottom], fill=0)
-            mask = TF.pad(mask, [0, 0, pad_right, pad_bottom], fill=IGNORE_INDEX)
+
+        pad_total_w = max(0, self.w - scaled_w)
+        pad_total_h = max(0, self.h - scaled_h)
+        if pad_total_w > 0 or pad_total_h > 0:
+            # Random/unbiased padding: không neo cứng về góc trên-trái
+            pad_left = random.randint(0, pad_total_w) if pad_total_w > 0 else 0
+            pad_right = pad_total_w - pad_left
+            pad_top = random.randint(0, pad_total_h) if pad_total_h > 0 else 0
+            pad_bottom = pad_total_h - pad_top
+            image = TF.pad(image, [pad_left, pad_top, pad_right, pad_bottom], fill=0)
+            mask = TF.pad(mask, [pad_left, pad_top, pad_right, pad_bottom], fill=IGNORE_INDEX)
+
         top, left, _, _ = transforms.RandomCrop.get_params(image, (self.h, self.w))
         image = TF.crop(image, top, left, self.h, self.w)
         mask = TF.crop(mask, top, left, self.h, self.w)
@@ -189,14 +252,23 @@ def resize_and_pad(image: Image.Image, mask: Image.Image, h: int, w: int):
 
 
 class VOCSegmentationDataset(Dataset):
-    def __init__(self, root: Path | str, split: str = "val", joint_transform=None) -> None:
+    def __init__(
+        self,
+        root: Path | str,
+        split: str = "val",
+        joint_transform=None,
+        split_dir: Path | str | None = None,
+        split_type: str = "benchmark",
+    ) -> None:
         self.root = Path(root)
         self.split = split
         self.joint_transform = joint_transform
+        self.split_dir = split_dir
+        self.split_type = split_type
 
         self.jpeg_dir = self.root / "JPEGImages"
         self.mask_dir = self.root / "SegmentationClass"
-        self.ids = read_split_ids(self.root, split)
+        self.ids = read_split_ids(self.root, split, split_dir=split_dir, split_type=split_type)
 
     def __len__(self) -> int:
         return len(self.ids)

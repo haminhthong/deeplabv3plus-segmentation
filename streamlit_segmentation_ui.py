@@ -10,7 +10,12 @@ from PIL import Image
 
 from config import CHECKPOINT_PATH, IGNORE_INDEX, NUM_CLASSES, VOC_ROOT
 from dataset_voc import read_split_ids
-from inference import load_checkpoint_model, overlay_mask, predict_original_size
+from inference import (
+    load_checkpoint_model,
+    overlay_mask,
+    predict_original_size,
+    predict_with_uncertainty,
+)
 from plot_training_curves import create_training_figure
 from voc_meta import VOC_CLASSES, mask_to_color_rgb
 
@@ -60,7 +65,7 @@ def load_model_safe(checkpoint_path_str: str, device_str: str):
 
 def main():
     st.set_page_config(page_title="DeepLabV3+ Semantic Segmentation UI", layout="wide")
-    st.title("DeepLabV3+ - Demo Phân Đoạn Ngữ Nghĩa (Pascal VOC 2012)")
+    st.title("DeepLabV3+ - Semantic Segmentation Platform (Pascal VOC 2012)")
 
     default_data_root = str(VOC_ROOT)
     default_ckpt = str(CHECKPOINT_PATH)
@@ -69,6 +74,7 @@ def main():
         st.header("Cấu hình")
         data_root_str = st.text_input("Data root", value=default_data_root)
         ckpt_path_str = st.text_input("Checkpoint", value=default_ckpt)
+        split_type = st.selectbox("Loại split", ["benchmark", "smoke"], index=0)
         split = st.selectbox("Split để dự đoán", ["val", "test", "train"], index=0)
 
         num_samples = st.slider("Số ảnh hiển thị", min_value=1, max_value=12, value=6, step=1)
@@ -106,7 +112,10 @@ def main():
                 st.stop()
 
             try:
-                pred_mask = predict_original_size(model, image, ckpt_image_size, torch.device(device_str))
+                outputs = predict_with_uncertainty(model, image, ckpt_image_size, torch.device(device_str))
+                pred_mask = outputs["hard_mask"]
+                entropy_map = outputs["entropy_map"]
+                max_prob_map = outputs["max_prob_map"]
             except torch.cuda.OutOfMemoryError:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -117,10 +126,30 @@ def main():
             pred_vis = mask_to_color_rgb(pred_mask, ignore_index=IGNORE_INDEX)
             pred_overlay = overlay_mask(image_rgb, pred_vis, alpha)
 
+            st.markdown("#### 1. Kết quả phân đoạn ngữ nghĩa")
             c1, c2, c3 = st.columns(3)
-            c1.image(image_rgb, caption="Ảnh gốc", use_container_width=True)
-            c2.image(pred_vis, caption="Mặt nạ phân đoạn ngữ nghĩa", use_container_width=True)
+            c1.image(image_rgb, caption="Ảnh gốc (Original)", use_container_width=True)
+            c2.image(pred_vis, caption="Mặt nạ phân đoạn (Class Mask)", use_container_width=True)
             c3.image(pred_overlay, caption="Ảnh phủ màu (Overlay)", use_container_width=True)
+
+            st.markdown("#### 2. Bản đồ độ bất định & Độ tin cậy (Uncertainty / Reliability Map)")
+            st.caption(
+                "Lưu ý: Bản đồ độ bất định thể hiện Normalized Entropy tại độ phân giải gốc của ảnh. "
+                "Vùng càng sáng thể hiện ranh giới hoặc đối tượng mà mô hình phân vân nhất, không phải xác suất Bayes đã hiệu chuẩn."
+            )
+            u1, u2 = st.columns(2)
+            u1.image(
+                entropy_map,
+                caption="Normalized Entropy Map (Vùng sáng = Bất định cao)",
+                clamp=True,
+                use_container_width=True,
+            )
+            u2.image(
+                max_prob_map,
+                caption="Max Softmax Probability Map (Vùng sáng = Độ tin cậy cục bộ cao)",
+                clamp=True,
+                use_container_width=True,
+            )
 
             st.markdown("### Kết quả lớp ngữ nghĩa xuất hiện (20 lớp VOC)")
             rows = summarize_present_classes(pred_mask, float(min_area))
@@ -157,9 +186,9 @@ def main():
             model, encoder, architecture, ckpt_image_size = load_model_safe(str(ckpt_path), device_str)
 
             try:
-                ids = read_split_ids(data_root, split)
+                ids = read_split_ids(data_root, split, split_type=split_type)
             except (FileNotFoundError, ValueError) as e:
-                st.error(f"Lỗi đọc tập dữ liệu {split}: {e}")
+                st.error(f"Lỗi đọc tập dữ liệu {split} ({split_type}): {e}")
                 st.stop()
 
             random.seed(int(random_seed))

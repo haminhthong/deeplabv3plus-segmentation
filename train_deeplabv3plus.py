@@ -65,9 +65,23 @@ class CombinedLoss(nn.Module):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Huấn luyện mô hình phân đoạn ảnh trên Pascal VOC")
     parser.add_argument("--data-root", type=str, default=str(VOC_ROOT))
-    parser.add_argument("--architecture", type=str, default="deeplabv3plus", choices=["deeplabv3plus", "unet", "fcn"])
+    parser.add_argument(
+        "--architecture",
+        type=str,
+        default="deeplabv3plus",
+        choices=["deeplabv3plus", "unet", "fpn"],
+        help="Kiến trúc mạng (Candidate A: unet, Candidate B: fpn, Candidate C: deeplabv3plus)",
+    )
     parser.add_argument("--encoder", type=str, default="resnet50")
     parser.add_argument("--encoder-weights", type=str, default="imagenet")
+    parser.add_argument(
+        "--split-type",
+        type=str,
+        default="benchmark",
+        choices=["benchmark", "smoke"],
+        help="Loại split dữ liệu ('benchmark' cho thử nghiệm chuẩn, 'smoke' chỉ dùng kiểm tra phần mềm)",
+    )
+    parser.add_argument("--splits-dir", type=Path, default=None, help="Thư mục chỉ định chứa các tệp split tùy chỉnh")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -96,17 +110,21 @@ def parse_args() -> argparse.Namespace:
 
 def create_dataloaders(args: argparse.Namespace, device: torch.device):
     data_root = Path(args.data_root)
-    validate_voc_dataset(data_root)
+    validate_voc_dataset(data_root, split_dir=args.splits_dir, split_type=args.split_type)
 
     train_dataset = VOCSegmentationDataset(
         data_root,
         split="train",
         joint_transform=get_train_transforms(args.image_size, args.image_size),
+        split_dir=args.splits_dir,
+        split_type=args.split_type,
     )
     val_dataset = VOCSegmentationDataset(
         data_root,
         split="val",
         joint_transform=get_val_transforms(args.image_size, args.image_size),
+        split_dir=args.splits_dir,
+        split_type=args.split_type,
     )
 
     train_loader = DataLoader(

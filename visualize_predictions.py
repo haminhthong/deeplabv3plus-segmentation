@@ -1,4 +1,4 @@
-"""Trực quan hóa ảnh, nhãn thật, mặt nạ dự đoán và ảnh phủ màu."""
+"""Trực quan hóa ảnh, nhãn thật, mặt nạ dự đoán, bản đồ bất định và ảnh phủ màu."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,12 @@ from PIL import Image
 
 from config import CHECKPOINT_PATH, IGNORE_INDEX, VOC_ROOT, configure_console
 from dataset_voc import VOCSegmentationDataset
-from inference import load_checkpoint_model, overlay_mask, predict_original_size
+from inference import (
+    load_checkpoint_model,
+    overlay_mask,
+    predict_original_size,
+    predict_with_uncertainty,
+)
 from voc_meta import mask_to_color_rgb
 
 
@@ -26,6 +31,13 @@ def main():
     )
     parser.add_argument("--split", default="val", choices=("train", "val", "test"))
     parser.add_argument(
+        "--split-type",
+        default="benchmark",
+        choices=("benchmark", "smoke"),
+        help="Loại split ('benchmark' hoặc 'smoke')",
+    )
+    parser.add_argument("--splits-dir", type=Path, default=None, help="Thư mục split tùy biến")
+    parser.add_argument(
         "--indices",
         type=int,
         nargs="*",
@@ -38,6 +50,12 @@ def main():
         type=int,
         default=None,
         help="Mặc định dùng kích thước ghi trong checkpoint",
+    )
+    parser.add_argument(
+        "--include-uncertainty",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Bao gồm cột trực quan hóa bản đồ bất định (Entropy)",
     )
     args = parser.parse_args()
 
@@ -52,8 +70,12 @@ def main():
         root=args.data_root,
         split=args.split,
         joint_transform=None,
+        split_dir=args.splits_dir,
+        split_type=args.split_type,
     )
     args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    num_cols = 5 if args.include_uncertainty else 4
 
     for idx in args.indices:
         if not 0 <= idx < len(ds):
@@ -64,22 +86,39 @@ def main():
             raw_img = source.convert("RGB")
         with Image.open(ds.mask_dir / f"{sid}.png") as source:
             gt = np.asarray(source, dtype=np.int64)
-        pred = predict_original_size(model, raw_img, image_size, device)
+
+        if args.include_uncertainty:
+            outputs = predict_with_uncertainty(model, raw_img, image_size, device)
+            pred = outputs["hard_mask"]
+            entropy_map = outputs["entropy_map"]
+        else:
+            pred = predict_original_size(model, raw_img, image_size, device)
+            entropy_map = None
+
         overlay = overlay_mask(
             np.asarray(raw_img),
             mask_to_color_rgb(pred, IGNORE_INDEX),
             alpha=0.45,
         )
 
-        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+        fig, axes = plt.subplots(1, num_cols, figsize=(4 * num_cols, 4))
         axes[0].imshow(raw_img)
         axes[0].set_title("Ảnh gốc")
         axes[1].imshow(mask_to_color_rgb(gt, IGNORE_INDEX))
         axes[1].set_title("Nhãn thật")
         axes[2].imshow(mask_to_color_rgb(pred, IGNORE_INDEX))
         axes[2].set_title("Dự đoán")
-        axes[3].imshow(overlay)
-        axes[3].set_title("Ảnh phủ màu")
+
+        if args.include_uncertainty and entropy_map is not None:
+            im = axes[3].imshow(entropy_map, cmap="inferno", vmin=0.0, vmax=1.0)
+            axes[3].set_title("Độ bất định (Entropy)")
+            plt.colorbar(im, ax=axes[3], fraction=0.046, pad=0.04)
+            axes[4].imshow(overlay)
+            axes[4].set_title("Ảnh phủ màu")
+        else:
+            axes[3].imshow(overlay)
+            axes[3].set_title("Ảnh phủ màu")
+
         for ax in axes:
             ax.axis("off")
         out = args.out_dir / f"{sid}_viz.png"
